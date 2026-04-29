@@ -3,6 +3,7 @@
 import { FormEvent, useState } from "react";
 import { KeyRound, LogIn } from "lucide-react";
 import { useRouter } from "next/navigation";
+import { ensureRegistrationKeyBundleUploaded } from "@/lib/crypto/registration";
 import { supabase } from "@/lib/supabase/client";
 import { upsertSignalProfile } from "@/lib/supabase/profiles";
 
@@ -44,6 +45,15 @@ export function LoginForm() {
           id: data.user.id,
           email: data.user.email,
           fullName: data.user.user_metadata?.full_name,
+        });
+      }
+
+      if (data.session?.access_token && data.user?.id) {
+        void ensureRegistrationKeyBundleUploaded({
+          userId: data.user.id,
+          accessToken: data.session.access_token,
+        }).catch((uploadError: unknown) => {
+          console.warn("Signed in, but the public key bundle could not be uploaded.", uploadError);
         });
       }
 

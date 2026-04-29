@@ -1,5 +1,6 @@
 from collections.abc import Generator
 import os
+from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
@@ -10,10 +11,17 @@ from supabase import Client, ClientOptions, create_client
 
 
 load_dotenv()
+load_dotenv(Path(__file__).resolve().parents[2] / "frontend-next" / ".env", override=False)
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./messenger.db")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
+SUPABASE_API_KEY = (
+    os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+    or os.getenv("SUPABASE_PUBLISHABLE_KEY")
+    or os.getenv("NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY")
+    or os.getenv("SUPABASE_ANON_KEY")
+    or os.getenv("NEXT_PUBLIC_SUPABASE_ANON_KEY")
+)
 SUPABASE_SIGNAL_SCHEMA = "signal_protocol"
 
 engine = create_engine(
@@ -38,12 +46,12 @@ def get_db() -> Generator[Session, None, None]:
 
 
 def get_supabase_client() -> Client:
-    if not SUPABASE_URL or not SUPABASE_ANON_KEY:
-        raise RuntimeError("SUPABASE_URL and SUPABASE_ANON_KEY must be configured in backend-fastapi/.env")
+    if not SUPABASE_URL or not SUPABASE_API_KEY:
+        raise RuntimeError("SUPABASE_URL and a Supabase API key must be configured in backend-fastapi/.env")
 
     return create_client(
         SUPABASE_URL,
-        SUPABASE_ANON_KEY,
+        SUPABASE_API_KEY,
         options=ClientOptions(schema=SUPABASE_SIGNAL_SCHEMA),
     )
 
@@ -149,6 +157,54 @@ class SignalProtocolRepository:
             ).execute()
 
         return signed_pre_key_response.data or []
+
+    def get_public_key_bundle(self, *, user_id: str) -> dict[str, Any] | None:
+        identity_response = (
+            self.client.table("identity_keys")
+            .select("user_id, identity_key_public")
+            .eq("user_id", user_id)
+            .limit(1)
+            .execute()
+        )
+        identity_rows = identity_response.data or []
+        if not identity_rows:
+            return None
+
+        signed_pre_key_response = (
+            self.client.table("pre_keys")
+            .select("signed_pre_key_id, signed_pre_key_public, signed_pre_key_signature")
+            .eq("user_id", user_id)
+            .limit(1)
+            .execute()
+        )
+        signed_pre_key_rows = signed_pre_key_response.data or []
+        if not signed_pre_key_rows:
+            return None
+
+        one_time_pre_keys_response = (
+            self.client.table("one_time_pre_keys")
+            .select("key_id, public_key")
+            .eq("user_id", user_id)
+            .order("key_id", desc=False)
+            .execute()
+        )
+
+        signed_pre_key = signed_pre_key_rows[0]
+        return {
+            "user_id": user_id,
+            "device_id": "primary",
+            "identity_key_public": identity_rows[0]["identity_key_public"],
+            "signed_pre_key_id": signed_pre_key["signed_pre_key_id"],
+            "signed_pre_key_public": signed_pre_key["signed_pre_key_public"],
+            "signed_pre_key_signature": signed_pre_key["signed_pre_key_signature"],
+            "one_time_pre_keys": [
+                {
+                    "key_id": str(pre_key["key_id"]),
+                    "public_key": pre_key["public_key"],
+                }
+                for pre_key in one_time_pre_keys_response.data or []
+            ],
+        }
 
     def consume_one_time_pre_key(self, *, user_id: str) -> dict[str, Any] | None:
         # X3DH requires a one-time pre-key to be deleted as soon as it is assigned to an initiator.

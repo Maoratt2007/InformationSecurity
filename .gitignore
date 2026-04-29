@@ -10,8 +10,19 @@ lerna-debug.log*
 node_modules
 dist
 dist-ssr
+.next/
+.next
+tsconfig.tsbuildinfo
 *.local
 *.env
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
 
 # Editor directories and files
 .vscode/*

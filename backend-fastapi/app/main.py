@@ -1,11 +1,20 @@
+import logging
 import os
+import time
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
-from .database import Base, engine
 from .routes.key_bundles import router as users_router
 from .websocket_manager import ConnectionManager
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s:     %(message)s")
+logger = logging.getLogger("secure_messenger")
+
+
+def log_to_terminal(message: str) -> None:
+    logger.info(message)
+    print(message, flush=True)
 
 FRONTEND_ORIGINS = [
     origin.strip()
@@ -23,7 +32,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-Base.metadata.create_all(bind=engine)
+
+@app.middleware("http")
+async def log_http_requests(request: Request, call_next):
+    started_at = time.perf_counter()
+    log_to_terminal(f"HTTP {request.method} {request.url.path}")
+    response = await call_next(request)
+    duration_ms = (time.perf_counter() - started_at) * 1000
+    log_to_terminal(f"HTTP {request.method} {request.url.path} -> {response.status_code} {duration_ms:.1f}ms")
+    return response
+
 
 app.include_router(users_router)
 

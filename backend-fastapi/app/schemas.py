@@ -25,6 +25,7 @@ class UserOut(BaseModel):
 class KeyBundleCreate(BaseModel):
     device_id: str = Field(default="primary", min_length=1, max_length=64)
     identity_key_public: str = Field(min_length=32, max_length=2048)
+    signed_pre_key_id: int = Field(default=1, ge=1)
     signed_pre_key_public: str = Field(min_length=32, max_length=2048)
     signed_pre_key_signature: str = Field(min_length=32, max_length=2048)
     one_time_pre_keys: list[OneTimePreKey] = Field(default_factory=list)
@@ -36,6 +37,7 @@ class KeyBundleOut(BaseModel):
     user_id: str
     device_id: str
     identity_key_public: str
+    signed_pre_key_id: int
     signed_pre_key_public: str
     signed_pre_key_signature: str
     one_time_pre_keys: list[OneTimePreKey]

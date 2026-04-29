@@ -3,6 +3,7 @@
 import { FormEvent, useState } from "react";
 import { UserPlus } from "lucide-react";
 import { useRouter } from "next/navigation";
+import { ensureRegistrationKeyBundleUploaded } from "@/lib/crypto/registration";
 import { supabase } from "@/lib/supabase/client";
 import { upsertSignalProfile } from "@/lib/supabase/profiles";
 
@@ -55,6 +56,17 @@ export function RegisterForm() {
           email: data.user.email,
           fullName,
         });
+
+        const {
+          data: { session },
+        } = await supabase.auth.getSession();
+
+        if (session?.access_token) {
+          await ensureRegistrationKeyBundleUploaded({
+            userId: data.user.id,
+            accessToken: session.access_token,
+          });
+        }
       }
 
       if (data.session) {
@@ -63,8 +75,8 @@ export function RegisterForm() {
       }
 
       setStatus("Registration complete. Check your email to verify your account before signing in.");
-    } catch {
-      setStatus("Could not reach Supabase Auth. Check the project URL, public key, and network connection.");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not complete registration.");
     } finally {
       setIsLoading(false);
     }

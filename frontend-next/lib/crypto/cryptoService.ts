@@ -24,6 +24,8 @@ export interface PrivateSignedPreKey {
   algorithm: "X25519";
   keyId: number;
   publicKey: Base64UrlString;
+  signature: Base64UrlString;
+  signatureAlgorithm: "Ed25519";
   privateKey: Base64UrlString;
 }
 
@@ -68,6 +70,7 @@ export interface GenerateRegistrationKeysOptions {
 export interface BackendKeyBundlePayload {
   device_id: string;
   identity_key_public: Base64UrlString;
+  signed_pre_key_id: number;
   signed_pre_key_public: Base64UrlString;
   signed_pre_key_signature: Base64UrlString;
   one_time_pre_keys: Array<{
@@ -142,6 +145,8 @@ export function generateSignedPreKey(identityKey: PrivateIdentityKey, keyId = DE
       algorithm: "X25519",
       keyId,
       publicKey: bytesToBase64Url(publicKey),
+      signature: bytesToBase64Url(signature),
+      signatureAlgorithm: "Ed25519",
       privateKey: bytesToBase64Url(secretKey),
     } satisfies PrivateSignedPreKey,
   };
@@ -221,10 +226,13 @@ export function generateRegistrationKeys(options: GenerateRegistrationKeysOption
   };
 }
 
+export const generateRegistrationBundle = generateRegistrationKeys;
+
 export function toBackendKeyBundlePayload(publicBundle: PublicRegistrationBundle): BackendKeyBundlePayload {
   return {
     device_id: publicBundle.deviceId,
     identity_key_public: publicBundle.identityKey.publicKey,
+    signed_pre_key_id: publicBundle.signedPreKey.keyId,
     signed_pre_key_public: publicBundle.signedPreKey.publicKey,
     signed_pre_key_signature: publicBundle.signedPreKey.signature,
     one_time_pre_keys: publicBundle.oneTimePreKeys.map((key) => ({
