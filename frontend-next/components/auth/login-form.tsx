@@ -2,9 +2,22 @@
 
 import { FormEvent, useState } from "react";
 import { KeyRound, LogIn } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase/client";
+import { upsertSignalProfile } from "@/lib/supabase/profiles";
+
+function getLoginErrorMessage(message: string) {
+  const normalizedMessage = message.toLowerCase();
+
+  if (normalizedMessage.includes("email not confirmed")) {
+    return "This account exists but the email is not confirmed. Confirm it in Supabase Auth or ask an administrator to confirm it.";
+  }
+
+  return message;
+}
 
 export function LoginForm() {
+  const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -15,11 +28,31 @@ export function LoginForm() {
     setError(null);
     setIsLoading(true);
 
-    const { error: signInError } = await supabase.auth.signInWithPassword({ email, password });
-    if (signInError) {
-      setError(signInError.message);
+    try {
+      const { data, error: signInError } = await supabase.auth.signInWithPassword({
+        email: email.trim().toLowerCase(),
+        password,
+      });
+
+      if (signInError) {
+        setError(getLoginErrorMessage(signInError.message));
+        return;
+      }
+
+      if (data.user?.email) {
+        await upsertSignalProfile({
+          id: data.user.id,
+          email: data.user.email,
+          fullName: data.user.user_metadata?.full_name,
+        });
+      }
+
+      router.push("/chat");
+    } catch {
+      setError("Could not reach Supabase Auth. Check the project URL, public key, and network connection.");
+    } finally {
+      setIsLoading(false);
     }
-    setIsLoading(false);
   }
 
   return (
@@ -28,11 +61,14 @@ export function LoginForm() {
       <div className="space-y-2">
         <label className="text-sm font-medium text-slate-700">Email</label>
         <input
-          type="email"
+          type="text"
+          inputMode="email"
+          autoCapitalize="none"
+          autoComplete="email"
           value={email}
           onChange={(event) => setEmail(event.target.value)}
           className="w-full rounded-lg border border-slate-300 px-3 py-2 outline-none ring-academy-500 transition focus:ring-2"
-          placeholder="student@university.edu"
+          placeholder="name@example.com"
           required
         />
       </div>

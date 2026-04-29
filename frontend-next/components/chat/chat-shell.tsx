@@ -8,27 +8,22 @@ import { ChatWindow } from "./chat-window";
 import { ContactList } from "./contact-list";
 import { MessageInput } from "./message-input";
 
-const CONTACTS: ChatContact[] = [
-  { id: "lecturer-001", name: "Dr. Noor", status: "online" },
-  { id: "ta-001", name: "Teaching Assistant", status: "online" },
-  { id: "student-042", name: "Research Partner", status: "offline" },
-];
-
 interface ChatShellProps {
   clientId: string;
+  contacts: ChatContact[];
 }
 
-export function ChatShell({ clientId }: ChatShellProps) {
-  const [activeContactId, setActiveContactId] = useState(CONTACTS[0].id);
+export function ChatShell({ clientId, contacts: initialContacts }: ChatShellProps) {
+  const [activeContactId, setActiveContactId] = useState(initialContacts[0]?.id ?? "");
   const { isConnected, messages, onlineClients, sendMessage } = useChatWebSocket(clientId);
 
   const contacts = useMemo<ChatContact[]>(
     () =>
-      CONTACTS.map((contact) => ({
+      initialContacts.map((contact) => ({
         ...contact,
         status: onlineClients.includes(contact.id) ? "online" : "offline",
       })),
-    [onlineClients],
+    [initialContacts, onlineClients],
   );
 
   const filteredMessages = messages.filter(
@@ -53,7 +48,7 @@ export function ChatShell({ clientId }: ChatShellProps) {
         </header>
         <ChatWindow messages={filteredMessages} currentUserId={clientId} />
         <MessageInput
-          disabled={!isConnected}
+          disabled={!isConnected || !activeContactId}
           onSend={(content) =>
             sendMessage({
               senderId: clientId,

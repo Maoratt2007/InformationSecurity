@@ -2,9 +2,26 @@
 
 import { FormEvent, useState } from "react";
 import { UserPlus } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase/client";
+import { upsertSignalProfile } from "@/lib/supabase/profiles";
+
+function getRegistrationErrorMessage(message: string) {
+  const normalizedMessage = message.toLowerCase();
+
+  if (normalizedMessage.includes("rate limit")) {
+    return "Supabase is temporarily limiting new registration emails. Please wait a few minutes and try again, or ask an administrator to create the account.";
+  }
+
+  if (normalizedMessage.includes("invalid")) {
+    return "Supabase rejected this email address. Use a real reachable email address from any provider.";
+  }
+
+  return message;
+}
 
 export function RegisterForm() {
+  const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [fullName, setFullName] = useState("");
@@ -16,18 +33,41 @@ export function RegisterForm() {
     setStatus(null);
     setIsLoading(true);
 
-    const { error } = await supabase.auth.signUp({
-      email,
-      password,
-      options: {
-        data: {
-          full_name: fullName,
+    try {
+      const { data, error } = await supabase.auth.signUp({
+        email: email.trim().toLowerCase(),
+        password,
+        options: {
+          data: {
+            full_name: fullName.trim(),
+          },
         },
-      },
-    });
+      });
 
-    setStatus(error ? error.message : "Registration complete. Check your email to verify your account.");
-    setIsLoading(false);
+      if (error) {
+        setStatus(getRegistrationErrorMessage(error.message));
+        return;
+      }
+
+      if (data.user?.email) {
+        await upsertSignalProfile({
+          id: data.user.id,
+          email: data.user.email,
+          fullName,
+        });
+      }
+
+      if (data.session) {
+        router.push("/chat");
+        return;
+      }
+
+      setStatus("Registration complete. Check your email to verify your account before signing in.");
+    } catch {
+      setStatus("Could not reach Supabase Auth. Check the project URL, public key, and network connection.");
+    } finally {
+      setIsLoading(false);
+    }
   }
 
   return (
@@ -47,11 +87,14 @@ export function RegisterForm() {
       <div className="space-y-2">
         <label className="text-sm font-medium text-slate-700">Email</label>
         <input
-          type="email"
+          type="text"
+          inputMode="email"
+          autoCapitalize="none"
+          autoComplete="email"
           value={email}
           onChange={(event) => setEmail(event.target.value)}
           className="w-full rounded-lg border border-slate-300 px-3 py-2 outline-none ring-academy-500 transition focus:ring-2"
-          placeholder="student@university.edu"
+          placeholder="name@example.com"
           required
         />
       </div>
