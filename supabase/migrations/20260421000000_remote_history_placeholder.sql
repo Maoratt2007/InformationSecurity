@@ -1,0 +1,2 @@
+-- Placeholder migration for an existing remote migration version.
+-- This keeps local Supabase migration history aligned with the remote project.
