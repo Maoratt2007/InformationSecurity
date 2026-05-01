@@ -103,6 +103,7 @@ async def websocket_chat(websocket: WebSocket, client_id: str) -> None:
                 "recipient_id": recipient_id,
                 "content": payload.get("content", ""),
                 "client_message_id": payload.get("client_message_id"),
+                "encryption_header": payload.get("encryption_header"),
             }
             delivered = False
             if recipient_id:
