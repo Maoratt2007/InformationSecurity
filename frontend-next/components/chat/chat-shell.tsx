@@ -1,9 +1,11 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { LogOut, ShieldCheck } from "lucide-react";
 import { logoutUser } from "@/lib/auth/logout";
 import { useChatWebSocket } from "@/hooks/use-chat-websocket";
+import { useSignalSession } from "@/hooks/use-signal-session";
+import { supabase } from "@/lib/supabase/client";
 import type { ChatContact } from "@/types/chat";
 import { ChatWindow } from "./chat-window";
 import { ContactList } from "./contact-list";
@@ -17,6 +19,40 @@ interface ChatShellProps {
 export function ChatShell({ clientId, contacts: initialContacts }: ChatShellProps) {
   const [activeContactId, setActiveContactId] = useState(initialContacts[0]?.id ?? "");
   const { isConnected, messages, onlineClients, sendMessage } = useChatWebSocket(clientId);
+  const { establishSession } = useSignalSession();
+
+  useEffect(() => {
+    if (!activeContactId) return;
+    if (activeContactId === clientId) return;
+
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const {
+          data: { session },
+        } = await supabase.auth.getSession();
+        const accessToken = session?.access_token;
+
+        if (!accessToken) {
+          console.warn(
+            "[ChatShell] Cannot establish secure session: no Supabase access token in current session.",
+          );
+          return;
+        }
+
+        if (cancelled) return;
+        await establishSession(activeContactId, accessToken);
+      } catch (error) {
+        console.error("[ChatShell] establishSession unexpected error:", error);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- establishSession is recreated each render; hook dedupes via sessionStorage
+  }, [activeContactId, clientId]);
 
   const contacts = useMemo<ChatContact[]>(
     () =>
