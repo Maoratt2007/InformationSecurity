@@ -1,17 +1,12 @@
-import logging
-
+import httpx
 from fastapi import APIRouter, Header, HTTPException, status
 
 from ..database import SignalProtocolRepository
+from ..logging_utils import log_event
 from ..schemas import KeyBundleCreate, KeyBundleOut, UserCreate, UserOut
+from ..supabase_jwt import get_user_id_from_access_token
 
 router = APIRouter(prefix="/api/users", tags=["users", "key-bundles"])
-logger = logging.getLogger("secure_messenger.key_bundles")
-
-
-def log_to_terminal(message: str) -> None:
-    logger.info(message)
-    print(message, flush=True)
 
 
 def get_authorized_user_id(repository: SignalProtocolRepository, authorization: str | None) -> str:
@@ -20,7 +15,33 @@ def get_authorized_user_id(repository: SignalProtocolRepository, authorization: 
 
     token = authorization.split(" ", 1)[1].strip()
     repository.client.postgrest.auth(token)
-    user_response = repository.client.auth.get_user(token)
+
+    user_id_local = get_user_id_from_access_token(token)
+    if user_id_local:
+        return user_id_local
+
+    try:
+        user_response = repository.client.auth.get_user(token)
+    except (
+        httpx.ConnectTimeout,
+        httpx.ConnectError,
+        httpx.ReadTimeout,
+        httpx.WriteTimeout,
+        httpx.PoolTimeout,
+    ) as exc:
+        log_event(
+            "Supabase Auth unreachable from backend (JWT local verify failed or JWT secret unset). "
+            f"{type(exc).__name__}: {exc}"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "Cannot reach Supabase Auth from this server (network/TLS timeout). "
+                "Add SUPABASE_JWT_SECRET from Supabase Dashboard (Settings -> API -> JWT Secret) "
+                "to backend-fastapi/.env so tokens are verified locally without calling Supabase over HTTPS."
+            ),
+        ) from exc
+
     if not user_response.user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid Supabase access token")
     return user_response.user.id
@@ -28,7 +49,7 @@ def get_authorized_user_id(repository: SignalProtocolRepository, authorization: 
 
 @router.post("", response_model=UserOut, status_code=status.HTTP_201_CREATED)
 def create_user(payload: UserCreate, authorization: str | None = Header(default=None)) -> dict:
-    log_to_terminal(f"Profile upsert received user_id={payload.id} email={payload.email}")
+    log_event(f"Profile upsert received user_id={payload.id} email={payload.email}")
     repository = SignalProtocolRepository()
     authorized_user_id = get_authorized_user_id(repository, authorization)
     if authorized_user_id != payload.id:
@@ -65,7 +86,7 @@ def upsert_key_bundle(
     payload: KeyBundleCreate,
     authorization: str | None = Header(default=None),
 ) -> dict:
-    log_to_terminal(
+    log_event(
         f"Key-bundle upload received user_id={user_id} "
         f"device_id={payload.device_id} one_time_pre_keys={len(payload.one_time_pre_keys)}"
     )
@@ -90,7 +111,7 @@ def upsert_key_bundle(
     bundle = repository.get_public_key_bundle(user_id=user_id)
     if not bundle:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Key bundle was not saved")
-    log_to_terminal(f"Key-bundle upload saved user_id={user_id} device_id={payload.device_id}")
+    log_event(f"Key-bundle upload saved user_id={user_id} device_id={payload.device_id}")
     return bundle
 
 
@@ -100,10 +121,14 @@ def get_key_bundle(
     device_id: str = "primary",
     authorization: str | None = Header(default=None),
 ) -> dict:
-    log_to_terminal(f"Key-bundle fetch received user_id={user_id} device_id={device_id}")
+    log_event(f"Key-bundle fetch received user_id={user_id} device_id={device_id}")
     repository = SignalProtocolRepository()
     get_authorized_user_id(repository, authorization)
-    bundle = repository.get_public_key_bundle(user_id=user_id)
+    bundle = repository.get_public_key_bundle(user_id=user_id, consume_one_time_pre_key=True)
     if not bundle:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Key bundle not found")
+    log_event(
+        f"Key-bundle fetch served user_id={user_id} "
+        f"opk_consumed={bool(bundle.get('one_time_pre_key'))}"
+    )
     return bundle

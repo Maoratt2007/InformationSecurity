@@ -14,10 +14,6 @@ function getRegistrationErrorMessage(message: string) {
     return "Supabase is temporarily limiting new registration emails. Please wait a few minutes and try again, or ask an administrator to create the account.";
   }
 
-  if (normalizedMessage.includes("invalid")) {
-    return "Supabase rejected this email address. Use a real reachable email address from any provider.";
-  }
-
   return message;
 }
 
@@ -36,7 +32,7 @@ export function RegisterForm() {
 
     try {
       const { data, error } = await supabase.auth.signUp({
-        email: email.trim().toLowerCase(),
+        email: email.trim(),
         password,
         options: {
           data: {
@@ -46,14 +42,19 @@ export function RegisterForm() {
       });
 
       if (error) {
+        console.error(
+          "Supabase Signup Error:",
+          error.message,
+          (error as { details?: unknown }).details,
+        );
         setStatus(getRegistrationErrorMessage(error.message));
         return;
       }
 
-      if (data.user?.email) {
+      if (data.user) {
         await upsertSignalProfile({
           id: data.user.id,
-          email: data.user.email,
+          email: data.user.email ?? email,
           fullName,
         });
 
@@ -100,13 +101,10 @@ export function RegisterForm() {
         <label className="text-sm font-medium text-slate-700">Email</label>
         <input
           type="text"
-          inputMode="email"
-          autoCapitalize="none"
-          autoComplete="email"
           value={email}
           onChange={(event) => setEmail(event.target.value)}
           className="w-full rounded-lg border border-slate-300 px-3 py-2 outline-none ring-academy-500 transition focus:ring-2"
-          placeholder="name@example.com"
+          placeholder="you@example.com"
           required
         />
       </div>

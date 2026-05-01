@@ -158,7 +158,12 @@ class SignalProtocolRepository:
 
         return signed_pre_key_response.data or []
 
-    def get_public_key_bundle(self, *, user_id: str) -> dict[str, Any] | None:
+    def get_public_key_bundle(
+        self,
+        *,
+        user_id: str,
+        consume_one_time_pre_key: bool = False,
+    ) -> dict[str, Any] | None:
         identity_response = (
             self.client.table("identity_keys")
             .select("user_id, identity_key_public")
@@ -181,15 +186,17 @@ class SignalProtocolRepository:
         if not signed_pre_key_rows:
             return None
 
-        one_time_pre_keys_response = (
-            self.client.table("one_time_pre_keys")
-            .select("key_id, public_key")
-            .eq("user_id", user_id)
-            .order("key_id", desc=False)
-            .execute()
-        )
-
         signed_pre_key = signed_pre_key_rows[0]
+
+        one_time_pre_key: dict[str, Any] | None = None
+        if consume_one_time_pre_key:
+            consumed = self.consume_one_time_pre_key(user_id=user_id)
+            if consumed:
+                one_time_pre_key = {
+                    "key_id": str(consumed["key_id"]),
+                    "public_key": consumed["public_key"],
+                }
+
         return {
             "user_id": user_id,
             "device_id": "primary",
@@ -197,13 +204,7 @@ class SignalProtocolRepository:
             "signed_pre_key_id": signed_pre_key["signed_pre_key_id"],
             "signed_pre_key_public": signed_pre_key["signed_pre_key_public"],
             "signed_pre_key_signature": signed_pre_key["signed_pre_key_signature"],
-            "one_time_pre_keys": [
-                {
-                    "key_id": str(pre_key["key_id"]),
-                    "public_key": pre_key["public_key"],
-                }
-                for pre_key in one_time_pre_keys_response.data or []
-            ],
+            "one_time_pre_key": one_time_pre_key,
         }
 
     def consume_one_time_pre_key(self, *, user_id: str) -> dict[str, Any] | None:

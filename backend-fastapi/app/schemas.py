@@ -1,4 +1,6 @@
 from datetime import datetime
+from typing import Optional
+
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 
@@ -40,4 +42,4 @@ class KeyBundleOut(BaseModel):
     signed_pre_key_id: int
     signed_pre_key_public: str
     signed_pre_key_signature: str
-    one_time_pre_keys: list[OneTimePreKey]
+    one_time_pre_key: Optional[OneTimePreKey] = None

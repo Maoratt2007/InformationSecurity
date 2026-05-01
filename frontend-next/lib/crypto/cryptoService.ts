@@ -55,9 +55,10 @@ export interface PrivateRegistrationBundle {
   createdAt: string;
 }
 
-export interface RegistrationKeyBundle {
+export interface SignalRegistrationResult {
   publicBundle: PublicRegistrationBundle;
   privateBundle: PrivateRegistrationBundle;
+  payload: SignalRegistrationPayload;
 }
 
 export interface GenerateRegistrationKeysOptions {
@@ -67,7 +68,7 @@ export interface GenerateRegistrationKeysOptions {
   oneTimePreKeyStartId?: number;
 }
 
-export interface BackendKeyBundlePayload {
+export interface SignalRegistrationPayload {
   device_id: string;
   identity_key_public: Base64UrlString;
   signed_pre_key_id: number;
@@ -78,6 +79,9 @@ export interface BackendKeyBundlePayload {
     public_key: Base64UrlString;
   }>;
 }
+
+export type RegistrationKeyBundle = SignalRegistrationResult;
+export type BackendKeyBundlePayload = SignalRegistrationPayload;
 
 export interface StorePrivateBundleOptions {
   userId: string;
@@ -192,7 +196,9 @@ export function generateOneTimePreKeys(
   };
 }
 
-export function generateRegistrationKeys(options: GenerateRegistrationKeysOptions = {}): RegistrationKeyBundle {
+export function generateSignalRegistrationKeys(
+  options: GenerateRegistrationKeysOptions = {},
+): SignalRegistrationResult {
   const deviceId = options.deviceId ?? DEFAULT_DEVICE_ID;
   const createdAt = new Date().toISOString();
   const identityKey = generateIdentityKeyPair();
@@ -205,30 +211,43 @@ export function generateRegistrationKeys(options: GenerateRegistrationKeysOption
     options.oneTimePreKeyStartId ?? DEFAULT_ONE_TIME_PRE_KEY_START_ID,
   );
 
-  return {
-    publicBundle: {
-      deviceId,
-      identityKey: {
-        algorithm: identityKey.algorithm,
-        publicKey: identityKey.publicKey,
-      },
-      signedPreKey: publicSignedPreKey,
-      oneTimePreKeys: publicOneTimePreKeys,
-      createdAt,
+  const publicBundle: PublicRegistrationBundle = {
+    deviceId,
+    identityKey: {
+      algorithm: identityKey.algorithm,
+      publicKey: identityKey.publicKey,
     },
-    privateBundle: {
-      deviceId,
-      identityKey,
-      signedPreKey: privateSignedPreKey,
-      oneTimePreKeys: privateOneTimePreKeys,
-      createdAt,
-    },
+    signedPreKey: publicSignedPreKey,
+    oneTimePreKeys: publicOneTimePreKeys,
+    createdAt,
   };
+
+  const privateBundle: PrivateRegistrationBundle = {
+    deviceId,
+    identityKey,
+    signedPreKey: privateSignedPreKey,
+    oneTimePreKeys: privateOneTimePreKeys,
+    createdAt,
+  };
+
+  const payload = toBackendKeyBundlePayload(publicBundle);
+  const result: SignalRegistrationResult = {
+    publicBundle,
+    privateBundle,
+    payload,
+  };
+
+  logSignalRegistrationResult(result);
+
+  return result;
 }
 
-export const generateRegistrationBundle = generateRegistrationKeys;
+export const generateRegistrationKeys = generateSignalRegistrationKeys;
+export const generateRegistrationBundle = generateSignalRegistrationKeys;
 
-export function toBackendKeyBundlePayload(publicBundle: PublicRegistrationBundle): BackendKeyBundlePayload {
+export function toBackendKeyBundlePayload(
+  publicBundle: PublicRegistrationBundle,
+): SignalRegistrationPayload {
   return {
     device_id: publicBundle.deviceId,
     identity_key_public: publicBundle.identityKey.publicKey,
@@ -252,6 +271,61 @@ export function verifySignedPreKey(publicBundle: PublicRegistrationBundle): bool
     base64UrlToBytes(publicBundle.identityKey.publicKey),
     { zip215: false },
   );
+}
+
+function logSignalRegistrationResult(result: SignalRegistrationResult): void {
+  const { privateBundle, publicBundle, payload } = result;
+
+  console.log("[Signal Registration] ========================================");
+  console.log("[Signal Registration] Generated client registration keys");
+  console.log("[Signal Registration] deviceId:", privateBundle.deviceId);
+  console.log("[Signal Registration] createdAt:", privateBundle.createdAt);
+
+  logEncodedValue("Identity Key (IK) public", privateBundle.identityKey.publicKey);
+  logEncodedValue("Identity Key (IK) private", privateBundle.identityKey.privateKey);
+
+  console.log("[Signal Registration] Signed Pre Key (SPK) keyId:", privateBundle.signedPreKey.keyId);
+  logEncodedValue("Signed Pre Key (SPK) public", privateBundle.signedPreKey.publicKey);
+  logEncodedValue("Signed Pre Key (SPK) private", privateBundle.signedPreKey.privateKey);
+  logEncodedValue("Signed Pre Key (SPK) signature", privateBundle.signedPreKey.signature);
+
+  console.log("[Signal Registration] One-Time Pre Keys (OPKs) count:", privateBundle.oneTimePreKeys.length);
+
+  for (const oneTimePreKey of privateBundle.oneTimePreKeys) {
+    console.log(`[Signal Registration] OPK #${oneTimePreKey.keyId}`);
+    logEncodedValue(`OPK #${oneTimePreKey.keyId} public`, oneTimePreKey.publicKey);
+    logEncodedValue(`OPK #${oneTimePreKey.keyId} private`, oneTimePreKey.privateKey);
+  }
+
+  console.log("[Signal Registration] Public bundle:", publicBundle);
+  console.log("[Signal Registration] Backend payload (public keys only):", payload);
+  console.log("[Signal Registration] Payload excludes private keys:", payloadHasNoPrivateKeys(payload, publicBundle));
+  console.log("[Signal Registration] ========================================");
+}
+
+function logEncodedValue(label: string, base64UrlValue: Base64UrlString): void {
+  console.log(`[Signal Registration] ${label} (Base64URL):`, base64UrlValue);
+  console.log(`[Signal Registration] ${label} (Hex):`, bytesToHex(base64UrlToBytes(base64UrlValue)));
+}
+
+function payloadHasNoPrivateKeys(
+  payload: SignalRegistrationPayload,
+  publicBundle: PublicRegistrationBundle,
+): boolean {
+  return (
+    payload.identity_key_public === publicBundle.identityKey.publicKey &&
+    payload.signed_pre_key_public === publicBundle.signedPreKey.publicKey &&
+    payload.signed_pre_key_signature === publicBundle.signedPreKey.signature &&
+    payload.one_time_pre_keys.length === publicBundle.oneTimePreKeys.length &&
+    payload.one_time_pre_keys.every((payloadKey, index) => {
+      const publicKey = publicBundle.oneTimePreKeys[index];
+      return payloadKey.key_id === String(publicKey.keyId) && payloadKey.public_key === publicKey.publicKey;
+    })
+  );
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 export async function storePrivateBundleInIndexedDb({

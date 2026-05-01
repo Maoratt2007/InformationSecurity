@@ -31,11 +31,16 @@ export function LoginForm() {
 
     try {
       const { data, error: signInError } = await supabase.auth.signInWithPassword({
-        email: email.trim().toLowerCase(),
+        email: email.trim(),
         password,
       });
 
       if (signInError) {
+        console.error(
+          "Supabase SignIn Error:",
+          signInError.message,
+          (signInError as { details?: unknown }).details,
+        );
         setError(getLoginErrorMessage(signInError.message));
         return;
       }

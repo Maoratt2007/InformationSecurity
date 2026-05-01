@@ -3,5 +3,6 @@ uvicorn[standard]
 sqlalchemy
 pydantic[email]
 python-dotenv
+PyJWT
 supabase
 psycopg2-binary

@@ -1,7 +1,8 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { ShieldCheck } from "lucide-react";
+import { LogOut, ShieldCheck } from "lucide-react";
+import { logoutUser } from "@/lib/auth/logout";
 import { useChatWebSocket } from "@/hooks/use-chat-websocket";
 import type { ChatContact } from "@/types/chat";
 import { ChatWindow } from "./chat-window";
@@ -41,10 +42,20 @@ export function ChatShell({ clientId, contacts: initialContacts }: ChatShellProp
             <p className="text-sm font-semibold text-slate-900">Secure Messaging Dashboard</p>
             <p className="text-xs text-slate-500">Session with {activeContactId}</p>
           </div>
-          <p className="flex items-center gap-2 text-xs text-slate-600">
-            <ShieldCheck className={`h-4 w-4 ${isConnected ? "text-emerald-600" : "text-slate-400"}`} />
-            {isConnected ? "Realtime connected" : "Disconnected"}
-          </p>
+          <div className="flex items-center gap-3">
+            <p className="flex items-center gap-2 text-xs text-slate-600">
+              <ShieldCheck className={`h-4 w-4 ${isConnected ? "text-emerald-600" : "text-slate-400"}`} />
+              {isConnected ? "Realtime connected" : "Disconnected"}
+            </p>
+            <button
+              type="button"
+              onClick={() => void logoutUser()}
+              className="inline-flex items-center gap-2 rounded-lg border border-rose-300 bg-white px-3 py-1.5 text-xs font-medium text-rose-700 hover:bg-rose-50"
+            >
+              <LogOut className="h-3.5 w-3.5" />
+              Log out
+            </button>
+          </div>
         </header>
         <ChatWindow messages={filteredMessages} currentUserId={clientId} />
         <MessageInput

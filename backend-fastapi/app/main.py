@@ -1,59 +1,94 @@
 import logging
-import os
 import time
 
+import httpx
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
+from .logging_utils import log_event
 from .routes.key_bundles import router as users_router
 from .websocket_manager import ConnectionManager
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:     %(message)s")
-logger = logging.getLogger("secure_messenger")
 
-
-def log_to_terminal(message: str) -> None:
-    logger.info(message)
-    print(message, flush=True)
-
-FRONTEND_ORIGINS = [
-    origin.strip()
-    for origin in os.getenv("FRONTEND_ORIGINS", "http://localhost:3000").split(",")
-    if origin.strip()
+ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
 ]
 
-app = FastAPI(title="Secure Messenger API", version="0.1.0")
+fastapi_app = FastAPI(title="Secure Messenger API", version="0.1.0")
+app = fastapi_app
 
-app.add_middleware(
+
+async def _upstream_unavailable_handler(request: Request, exc: Exception) -> JSONResponse:
+    log_event(f"Upstream HTTPS error: {type(exc).__name__}: {exc}")
+    return JSONResponse(
+        status_code=503,
+        content={
+            "detail": (
+                "Backend could not reach Supabase over HTTPS (timeout or connection error). "
+                "For auth, set SUPABASE_JWT_SECRET in backend-fastapi/.env. "
+                "If database calls also fail, fix firewall/VPN/antivirus or outbound TLS to *.supabase.co."
+            ),
+            "type": type(exc).__name__,
+        },
+    )
+
+
+for _exc_type in (
+    httpx.ConnectTimeout,
+    httpx.ConnectError,
+    httpx.ReadTimeout,
+    httpx.WriteTimeout,
+    httpx.PoolTimeout,
+):
+    fastapi_app.add_exception_handler(_exc_type, _upstream_unavailable_handler)
+
+fastapi_app.add_middleware(
     CORSMiddleware,
-    allow_origins=FRONTEND_ORIGINS,
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
+    max_age=600,
 )
 
 
-@app.middleware("http")
+@fastapi_app.middleware("http")
 async def log_http_requests(request: Request, call_next):
     started_at = time.perf_counter()
-    log_to_terminal(f"HTTP {request.method} {request.url.path}")
-    response = await call_next(request)
+    log_event(f"HTTP {request.method} {request.url.path}")
+    try:
+        response = await call_next(request)
+    except Exception as exc:
+        duration_ms = (time.perf_counter() - started_at) * 1000
+        log_event(f"HTTP {request.method} {request.url.path} -> ERROR {type(exc).__name__} {duration_ms:.1f}ms")
+        raise
+
     duration_ms = (time.perf_counter() - started_at) * 1000
-    log_to_terminal(f"HTTP {request.method} {request.url.path} -> {response.status_code} {duration_ms:.1f}ms")
+    log_event(f"HTTP {request.method} {request.url.path} -> {response.status_code} {duration_ms:.1f}ms")
     return response
 
 
-app.include_router(users_router)
+fastapi_app.include_router(users_router)
 
 manager = ConnectionManager()
 
 
-@app.get("/health")
+@fastapi_app.on_event("startup")
+async def log_startup() -> None:
+    log_event("FastAPI server started. Request logging is active.")
+
+
+@fastapi_app.get("/health")
 def health() -> dict[str, str]:
+    log_event("Health check received")
     return {"status": "ok"}
 
 
-@app.websocket("/ws/chat/{client_id}")
+@fastapi_app.websocket("/ws/chat/{client_id}")
 async def websocket_chat(websocket: WebSocket, client_id: str) -> None:
     await manager.connect(client_id=client_id, websocket=websocket)
     await manager.broadcast_presence()
@@ -76,3 +111,19 @@ async def websocket_chat(websocket: WebSocket, client_id: str) -> None:
     except WebSocketDisconnect:
         manager.disconnect(client_id=client_id)
         await manager.broadcast_presence()
+
+
+class RequestLoggingASGIWrapper:
+    def __init__(self, wrapped_app):
+        self.wrapped_app = wrapped_app
+
+    def __getattr__(self, name):
+        return getattr(self.wrapped_app, name)
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") == "http":
+            log_event(f"ASGI HTTP {scope.get('method')} {scope.get('path')}")
+        await self.wrapped_app(scope, receive, send)
+
+
+app = RequestLoggingASGIWrapper(fastapi_app)
