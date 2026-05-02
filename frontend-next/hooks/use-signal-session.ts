@@ -65,9 +65,6 @@ export function useSignalSession() {
         role: "initiator",
       });
 
-      console.log(
-        `[Signal] Initiator session with ${activeContactId} masterSecret=${masterSecret.slice(0, 16)}…`,
-      );
       dispatchSignalSessionUpdated({ peerUserId: activeContactId });
     } catch (error) {
       errored = true;

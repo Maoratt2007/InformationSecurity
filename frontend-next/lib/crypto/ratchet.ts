@@ -9,15 +9,7 @@ const KDF_CHAIN = new Uint8Array([0x02]);
 
 type RatchetRole = "initiator" | "responder";
 
-const DBG = "[Ratchet-Debug]";
-
-/** Short hex preview for console (never log full raw keys). */
-function dbgKeyPreview(bytes: Uint8Array): string {
-  const hex = bytesToHex(bytes);
-  return `${hex.slice(0, 16)}…(${bytes.length} bytes)`;
-}
-
-/** Wire JSON shape for `localStorage` — hex-encoded key material only. */
+/** Wire JSON for sessionStorage — hex-encoded key material + counters. */
 interface RatchetWireV1 {
   v: 1;
   role: RatchetRole;
@@ -29,15 +21,8 @@ interface RatchetWireV1 {
 }
 
 /**
- * Minimal symmetric Double Ratchet: two KDF chains (sender / receiver) rooted
- * in a shared `rootKey`, with per-direction counters.
- *
- * Peers agree on chain direction via X3DH role:
- * - Initiator: sender = AB, receiver = BA
- * - Responder: sender = BA, receiver = AB
- *
- * One step: `messageKey = HMAC-SHA256(chainKey, 0x01)`,
- * `nextChainKey = HMAC-SHA256(chainKey, 0x02)` (Web Crypto HMAC-SHA-256).
+ * Symmetric ratchet: sender / receiver chains from shared rootKey; one step:
+ * messageKey = HMAC-SHA256(chainKey, 0x01), nextChain = HMAC-SHA256(chainKey, 0x02).
  */
 export class RatchetSession {
   private readonly rootKey: Uint8Array;
@@ -59,15 +44,10 @@ export class RatchetSession {
     this.receiverChain = new Uint8Array(0);
   }
 
-  /** After X3DH: build chain heads from `rootKey` (32-byte shared secret material). */
   static async fromRootKey(rootKey: Uint8Array, role: RatchetRole): Promise<RatchetSession> {
     const session = new RatchetSession(rootKey, role);
     const ab = await RatchetSession.hmacSha256(session.rootKey, LABEL_AB);
     const ba = await RatchetSession.hmacSha256(session.rootKey, LABEL_BA);
-    console.log(
-      `${DBG} Initialization: rootKey (decoded masterSecret bytes)=${dbgKeyPreview(session.rootKey)} role=${session.role}`,
-    );
-    console.log(`${DBG} Initialization: chain seed AB=${dbgKeyPreview(ab)} BA=${dbgKeyPreview(ba)}`);
     if (session.role === "initiator") {
       session.senderChain = ab;
       session.receiverChain = ba;
@@ -75,32 +55,24 @@ export class RatchetSession {
       session.senderChain = ba;
       session.receiverChain = ab;
     }
-    console.log(
-      `${DBG} Initialization: senderChain(head)=${dbgKeyPreview(session.senderChain)} receiverChain(head)=${dbgKeyPreview(session.receiverChain)}`,
-    );
     return session;
   }
 
-  /** Next outbound message: one chain step; returns AES-256 message key + wire counter. */
   async getNextSenderKey(): Promise<{ messageKey: Uint8Array; counter: number }> {
     if (this.senderChain.length !== 32) {
       throw new Error("RatchetSession.getNextSenderKey: invalid sender chain.");
     }
-    console.log(`${DBG} Send: senderChainKey (before roll)=${dbgKeyPreview(this.senderChain)}`);
     const counter = this.senderCounter;
+    const hexKey = bytesToHex(this.senderChain);
+    console.log("[Ratchet-Debug] Send: senderChainKey (before roll)=", hexKey, "counter=", counter);
     const { messageKey, chainKey } = await RatchetSession.kdfChainStep(this.senderChain);
+    console.log("[Ratchet-Debug] Send: derived messageKey=", bytesToHex(messageKey));
     this.senderChain = chainKey;
     this.senderCounter += 1;
-    console.log(`${DBG} Send: messageKey (this message)=${dbgKeyPreview(messageKey)}`);
-    console.log(`${DBG} Send: senderChainKey (after roll, next message)=${dbgKeyPreview(this.senderChain)}`);
-    console.log(`${DBG} Send: header counter=${counter}`);
+    console.log("[Ratchet-Debug] Send: new senderChainKey=", bytesToHex(this.senderChain));
     return { messageKey, counter };
   }
 
-  /**
-   * If `counter` is ahead of the local receiver counter, KDF forward and discard
-   * skipped message keys until it matches, then derive the key for this message.
-   */
   async advanceReceiverTo(counter: number): Promise<Uint8Array> {
     if (this.receiverChain.length !== 32) {
       throw new Error("RatchetSession.advanceReceiverTo: invalid receiver chain.");
@@ -108,28 +80,31 @@ export class RatchetSession {
     if (!Number.isInteger(counter) || counter < 0) {
       throw new Error("RatchetSession.advanceReceiverTo: counter must be a non-negative integer.");
     }
-    console.log(`${DBG} Receive: counter (from header)=${counter} nextExpected=${this.receiverCounter}`);
+    console.log(
+      "[Ratchet-Debug] Receive: counter from header=",
+      counter,
+      "expected=",
+      this.receiverCounter,
+    );
     if (counter < this.receiverCounter) {
       throw new Error(
         `RatchetSession.advanceReceiverTo: stale counter ${counter} (next expected ${this.receiverCounter}).`,
       );
     }
-    console.log(`${DBG} Receive: receiverChainKey (initial chain head)=${dbgKeyPreview(this.receiverChain)}`);
     if (this.receiverCounter < counter) {
-      const x = this.receiverCounter;
-      const y = counter - 1;
-      console.log(`${DBG} Skipping keys from index ${x} to ${y}`);
+      console.log(
+        `[Ratchet-Debug] Skipping keys from index ${this.receiverCounter} to ${counter - 1}`,
+      );
     }
     while (this.receiverCounter < counter) {
       const { chainKey } = await RatchetSession.kdfChainStep(this.receiverChain);
       this.receiverChain = chainKey;
       this.receiverCounter += 1;
     }
-    console.log(`${DBG} Receive: receiverChainKey (used for decryption derivation)=${dbgKeyPreview(this.receiverChain)}`);
     const { messageKey, chainKey } = await RatchetSession.kdfChainStep(this.receiverChain);
+    console.log("[Ratchet-Debug] Receive: derived decryptionKey=", bytesToHex(messageKey));
     this.receiverChain = chainKey;
     this.receiverCounter += 1;
-    console.log(`${DBG} Receive: decryptionKey (messageKey)=${dbgKeyPreview(messageKey)}`);
     return messageKey;
   }
 
@@ -146,6 +121,7 @@ export class RatchetSession {
     return JSON.stringify(wire);
   }
 
+  /** Restores chains and sender/receiver counters from sessionStorage JSON. */
   static async deserialize(json: string): Promise<RatchetSession> {
     const wire = JSON.parse(json) as RatchetWireV1;
     if (wire.v !== 1 || (wire.role !== "initiator" && wire.role !== "responder")) {
@@ -159,13 +135,6 @@ export class RatchetSession {
     if (session.senderChain.length !== 32 || session.receiverChain.length !== 32) {
       throw new Error("RatchetSession.deserialize: chain keys must be 32 bytes.");
     }
-    console.log(
-      `${DBG} Initialization (restored): rootKey=${dbgKeyPreview(session.rootKey)} role=${session.role} ` +
-        `senderCounter=${session.senderCounter} receiverCounter=${session.receiverCounter}`,
-    );
-    console.log(
-      `${DBG} Initialization (restored): senderChain=${dbgKeyPreview(session.senderChain)} receiverChain=${dbgKeyPreview(session.receiverChain)}`,
-    );
     return session;
   }
 

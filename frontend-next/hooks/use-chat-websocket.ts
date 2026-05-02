@@ -19,8 +19,6 @@ const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
 
 const PRIVATE_BUNDLE_PREFIX = "secure-messenger.signal.private-bundle.v1";
 
-const RATCHET_DBG = "[Ratchet-Debug]";
-
 /** Fired when `session_${peerId}` is written after X3DH (UI thumbprint, etc.). */
 export const SIGNAL_SESSION_UPDATED_EVENT = "secure-messenger.signal-session-updated";
 
@@ -115,7 +113,10 @@ interface HistoryRow {
   created_at: string;
 }
 
-/** Persisted next to X3DH metadata; `ratchetJson` is `RatchetSession.serialize()`. */
+/**
+ * One JSON blob in sessionStorage per peer: X3DH metadata + serialized ratchet
+ * (chains + senderCounter / receiverCounter). Survives reload in the same tab.
+ */
 interface StoredPeerSession {
   masterSecret: string;
   ephemeralPublicKey: string;
@@ -130,15 +131,7 @@ function sessionKey(peerId: string): string {
 
 function readStoredPeerSession(peerId: string): StoredPeerSession | null {
   if (typeof window === "undefined") return null;
-  const k = sessionKey(peerId);
-  let raw = window.localStorage.getItem(k);
-  if (!raw) {
-    raw = window.sessionStorage.getItem(k);
-    if (raw) {
-      window.localStorage.setItem(k, raw);
-      window.sessionStorage.removeItem(k);
-    }
-  }
+  const raw = window.sessionStorage.getItem(sessionKey(peerId));
   if (!raw) return null;
   try {
     const o = JSON.parse(raw) as Record<string, unknown>;
@@ -160,28 +153,19 @@ function readStoredPeerSession(peerId: string): StoredPeerSession | null {
 
 function writeStoredPeerSession(peerId: string, session: StoredPeerSession): void {
   if (typeof window === "undefined") return;
-  window.localStorage.setItem(sessionKey(peerId), JSON.stringify(session));
+  window.sessionStorage.setItem(sessionKey(peerId), JSON.stringify(session));
 }
 
-function dbgRootPreviewFromMasterSecret(masterSecret: string): string {
-  const raw = base64UrlToBytes(masterSecret);
-  const hex = bytesToHex(raw);
-  return `${hex.slice(0, 16)}…(${raw.length} bytes)`;
-}
-
-async function loadLiveRatchet(peerId: string, context?: string): Promise<RatchetSession | null> {
+/**
+ * Load ratchet for live TX/RX: prefers saved `ratchetJson` so counters/chains
+ * match the last message in this tab (deserialize restores senderCounter/receiverCounter).
+ */
+async function loadLiveRatchet(peerId: string): Promise<RatchetSession | null> {
   const stored = readStoredPeerSession(peerId);
   if (!stored?.masterSecret) return null;
-  const ctx = context ? ` ${context}` : "";
   if (stored.ratchetJson) {
-    console.log(
-      `${RATCHET_DBG} loadLiveRatchet peer=${peerId}${ctx}: restoring serialized ratchet (see Initialization restored logs)`,
-    );
     return RatchetSession.deserialize(stored.ratchetJson);
   }
-  console.log(
-    `${RATCHET_DBG} loadLiveRatchet peer=${peerId}${ctx}: rootKey from masterSecret=${dbgRootPreviewFromMasterSecret(stored.masterSecret)}`,
-  );
   const r = await RatchetSession.fromRootKey(base64UrlToBytes(stored.masterSecret), stored.role);
   writeStoredPeerSession(peerId, { ...stored, ratchetJson: r.serialize() });
   return r;
@@ -198,12 +182,14 @@ export async function persistPeerSessionWithRatchet(
   peerId: string,
   payload: Omit<StoredPeerSession, "ratchetJson">,
 ): Promise<void> {
+  const masterSecretHex = bytesToHex(base64UrlToBytes(payload.masterSecret));
   console.log(
-    `${RATCHET_DBG} persistPeerSessionWithRatchet peer=${peerId} role=${payload.role} rootKey(from masterSecret)=${dbgRootPreviewFromMasterSecret(payload.masterSecret)}`,
+    "%c[X3DH] 🔑 MasterSecret Generated:",
+    "color: #ff00ff; font-weight: bold;",
+    masterSecretHex,
   );
   const ratchet = await RatchetSession.fromRootKey(base64UrlToBytes(payload.masterSecret), payload.role);
   writeStoredPeerSession(peerId, { ...payload, ratchetJson: ratchet.serialize() });
-  console.log(`${RATCHET_DBG} persistPeerSessionWithRatchet peer=${peerId}: ratchet JSON saved to localStorage`);
 }
 
 function readActiveSession(peerId: string): {
@@ -335,7 +321,6 @@ export async function maybeDeriveSession(
       usedOneTimePreKeyId: header.used_one_time_pre_key_id,
       role: "responder",
     });
-    console.log(`[Signal] Incoming session derived from ${senderId} masterSecret=${masterSecret.slice(0, 16)}…`);
     dispatchSignalSessionUpdated({ peerUserId: senderId });
   };
 
@@ -421,24 +406,22 @@ export function useChatWebSocket(clientId: string) {
         return;
       }
       const rows = (await res.json()) as HistoryRow[];
+      const rowsChrono = [...rows].sort(
+        (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
+      );
 
-      for (const row of rows) {
+      for (const row of rowsChrono) {
         await maybeDeriveSession(clientId, row.sender_id, row.encryption_header);
       }
 
       const stored = readStoredPeerSession(peerId);
-      console.log(
-        `${RATCHET_DBG} loadConversation history replay peer=${peerId} rows=${rows.length} ` +
-          (stored?.masterSecret
-            ? `rootKey=${dbgRootPreviewFromMasterSecret(stored.masterSecret)} role=${stored.role}`
-            : "(no session)"),
-      );
+      // Replay from chain index 0 so header.counter aligns (does not mutate live ratchet in session_${peerId}).
       const replay =
         stored?.masterSecret &&
         (await RatchetSession.fromRootKey(base64UrlToBytes(stored.masterSecret), stored.role));
 
       const decryptedRows: { row: HistoryRow; content: string }[] = [];
-      for (const row of rows) {
+      for (const row of rowsChrono) {
         const header = row.encryption_header as EncryptionHeader | undefined;
         const sessionPeerId = row.sender_id === clientId ? row.recipient_id : row.sender_id;
         let content: string;
@@ -591,10 +574,7 @@ export function useChatWebSocket(clientId: string) {
           let decrypted: string;
           if (header && typeof header.counter === "number") {
             try {
-              console.log(
-                `${RATCHET_DBG} WebSocket inbound peer=${sessionPeerId} header.counter=${header.counter}`,
-              );
-              const ratchet = await loadLiveRatchet(sessionPeerId, "ws-rx");
+              const ratchet = await loadLiveRatchet(sessionPeerId);
               if (!ratchet) {
                 decrypted = ENCRYPTED_PLACEHOLDER;
               } else {
@@ -655,18 +635,12 @@ export function useChatWebSocket(clientId: string) {
       let ciphertext: string;
       let counter: number;
       try {
-        console.log(
-          `${RATCHET_DBG} WebSocket outbound peer=${message.recipientId} (following Send lines show chain evolution)`,
-        );
-        const ratchet = await loadLiveRatchet(message.recipientId, "ws-tx");
+        const ratchet = await loadLiveRatchet(message.recipientId);
         if (!ratchet) throw new Error("no ratchet");
         const next = await ratchet.getNextSenderKey();
         await saveLiveRatchet(message.recipientId, ratchet);
         ciphertext = await encryptWithMessageKey(next.messageKey, message.content);
         counter = next.counter;
-        console.log(
-          `${RATCHET_DBG} WebSocket outbound peer=${message.recipientId} encrypted bytes=${ciphertext.length} header.counter=${counter}`,
-        );
       } catch (error) {
         console.error("[ChatWS] Encryption failed; not sending:", error);
         return;
