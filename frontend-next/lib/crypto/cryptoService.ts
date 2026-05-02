@@ -324,8 +324,21 @@ function payloadHasNoPrivateKeys(
   );
 }
 
-function bytesToHex(bytes: Uint8Array): string {
+export function bytesToHex(bytes: Uint8Array): string {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+/** Parses a contiguous lowercase hex string into bytes (two hex chars per byte). */
+export function hexToBytes(hex: string): Uint8Array {
+  const normalized = hex.trim();
+  if (normalized.length % 2 !== 0) {
+    throw new Error("hexToBytes: hex string length must be even.");
+  }
+  const out = new Uint8Array(normalized.length / 2);
+  for (let i = 0; i < out.length; i += 1) {
+    out[i] = Number.parseInt(normalized.slice(i * 2, i * 2 + 2), 16);
+  }
+  return out;
 }
 
 export async function storePrivateBundleInIndexedDb({
@@ -378,7 +391,7 @@ function buildSignedPreKeySignatureMessage(keyId: number, publicKey: Uint8Array)
   return message;
 }
 
-function bytesToBase64Url(bytes: Uint8Array): Base64UrlString {
+export function bytesToBase64Url(bytes: Uint8Array): Base64UrlString {
   let binary = "";
 
   for (const byte of bytes) {
@@ -388,7 +401,7 @@ function bytesToBase64Url(bytes: Uint8Array): Base64UrlString {
   return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
 }
 
-function base64UrlToBytes(value: Base64UrlString): Uint8Array {
+export function base64UrlToBytes(value: Base64UrlString): Uint8Array {
   const paddedBase64 = value.replaceAll("-", "+").replaceAll("_", "/").padEnd(
     Math.ceil(value.length / 4) * 4,
     "=",

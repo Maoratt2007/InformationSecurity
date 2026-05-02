@@ -1,6 +1,7 @@
 import { initiateX3DH } from "../lib/crypto/x3dh";
 import {
   dispatchSignalSessionUpdated,
+  persistPeerSessionWithRatchet,
   readMyPrivateBundle,
   readStoredMasterSecret,
 } from "./use-chat-websocket";
@@ -57,14 +58,12 @@ export function useSignalSession() {
         receiverBundle,
       );
 
-      window.sessionStorage.setItem(
-        `session_${activeContactId}`,
-        JSON.stringify({
-          masterSecret,
-          ephemeralPublicKey,
-          usedOneTimePreKeyId,
-        }),
-      );
+      await persistPeerSessionWithRatchet(activeContactId, {
+        masterSecret,
+        ephemeralPublicKey,
+        usedOneTimePreKeyId,
+        role: "initiator",
+      });
 
       console.log(
         `[Signal] Initiator session with ${activeContactId} masterSecret=${masterSecret.slice(0, 16)}…`,

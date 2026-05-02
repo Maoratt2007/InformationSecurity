@@ -1,11 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { base64UrlToBytes, bytesToHex } from "@/lib/crypto/cryptoService";
 import {
   decryptOrPlaceholder,
+  decryptWithMessageKey,
   ENCRYPTED_PLACEHOLDER,
-  encryptMessage,
+  encryptWithMessageKey,
 } from "@/lib/crypto/encryption";
+import { RatchetSession } from "@/lib/crypto/ratchet";
 import { deriveIncomingSession } from "@/lib/crypto/x3dh";
 import { ensureRegistrationKeyBundleUploaded } from "@/lib/crypto/registration";
 import { supabase } from "@/lib/supabase/client";
@@ -15,6 +18,8 @@ const WS_BASE_URL = process.env.NEXT_PUBLIC_CHAT_WS_URL ?? "ws://localhost:8000/
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
 
 const PRIVATE_BUNDLE_PREFIX = "secure-messenger.signal.private-bundle.v1";
+
+const RATCHET_DBG = "[Ratchet-Debug]";
 
 /** Fired when `session_${peerId}` is written after X3DH (UI thumbprint, etc.). */
 export const SIGNAL_SESSION_UPDATED_EVENT = "secure-messenger.signal-session-updated";
@@ -79,6 +84,7 @@ export interface EncryptionHeader {
   ephemeral_public_key: string;
   used_one_time_pre_key_id: string | null;
   sender_identity_key_public: string;
+  counter?: number;
 }
 
 interface ChatEvent {
@@ -109,45 +115,111 @@ interface HistoryRow {
   created_at: string;
 }
 
-function isUsableEncryptionHeader(h: unknown): h is EncryptionHeader {
-  if (!h || typeof h !== "object") return false;
-  const o = h as Record<string, unknown>;
-  return (
-    typeof o.ephemeral_public_key === "string" &&
-    o.ephemeral_public_key.length > 0 &&
-    typeof o.sender_identity_key_public === "string" &&
-    o.sender_identity_key_public.length > 0
+/** Persisted next to X3DH metadata; `ratchetJson` is `RatchetSession.serialize()`. */
+interface StoredPeerSession {
+  masterSecret: string;
+  ephemeralPublicKey: string;
+  usedOneTimePreKeyId: string | null;
+  role: "initiator" | "responder";
+  ratchetJson: string;
+}
+
+function sessionKey(peerId: string): string {
+  return `session_${peerId}`;
+}
+
+function readStoredPeerSession(peerId: string): StoredPeerSession | null {
+  if (typeof window === "undefined") return null;
+  const k = sessionKey(peerId);
+  let raw = window.localStorage.getItem(k);
+  if (!raw) {
+    raw = window.sessionStorage.getItem(k);
+    if (raw) {
+      window.localStorage.setItem(k, raw);
+      window.sessionStorage.removeItem(k);
+    }
+  }
+  if (!raw) return null;
+  try {
+    const o = JSON.parse(raw) as Record<string, unknown>;
+    if (typeof o.masterSecret !== "string" || typeof o.ephemeralPublicKey !== "string") return null;
+    return {
+      masterSecret: o.masterSecret,
+      ephemeralPublicKey: o.ephemeralPublicKey,
+      usedOneTimePreKeyId:
+        o.usedOneTimePreKeyId === undefined || o.usedOneTimePreKeyId === null
+          ? null
+          : String(o.usedOneTimePreKeyId),
+      role: o.role === "responder" ? "responder" : "initiator",
+      ratchetJson: typeof o.ratchetJson === "string" ? o.ratchetJson : "",
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredPeerSession(peerId: string, session: StoredPeerSession): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(sessionKey(peerId), JSON.stringify(session));
+}
+
+function dbgRootPreviewFromMasterSecret(masterSecret: string): string {
+  const raw = base64UrlToBytes(masterSecret);
+  const hex = bytesToHex(raw);
+  return `${hex.slice(0, 16)}…(${raw.length} bytes)`;
+}
+
+async function loadLiveRatchet(peerId: string, context?: string): Promise<RatchetSession | null> {
+  const stored = readStoredPeerSession(peerId);
+  if (!stored?.masterSecret) return null;
+  const ctx = context ? ` ${context}` : "";
+  if (stored.ratchetJson) {
+    console.log(
+      `${RATCHET_DBG} loadLiveRatchet peer=${peerId}${ctx}: restoring serialized ratchet (see Initialization restored logs)`,
+    );
+    return RatchetSession.deserialize(stored.ratchetJson);
+  }
+  console.log(
+    `${RATCHET_DBG} loadLiveRatchet peer=${peerId}${ctx}: rootKey from masterSecret=${dbgRootPreviewFromMasterSecret(stored.masterSecret)}`,
   );
+  const r = await RatchetSession.fromRootKey(base64UrlToBytes(stored.masterSecret), stored.role);
+  writeStoredPeerSession(peerId, { ...stored, ratchetJson: r.serialize() });
+  return r;
+}
+
+async function saveLiveRatchet(peerId: string, ratchet: RatchetSession): Promise<void> {
+  const stored = readStoredPeerSession(peerId);
+  if (!stored) return;
+  writeStoredPeerSession(peerId, { ...stored, ratchetJson: ratchet.serialize() });
+}
+
+/** Export for `use-signal-session`: persist peer session + fresh ratchet after X3DH. */
+export async function persistPeerSessionWithRatchet(
+  peerId: string,
+  payload: Omit<StoredPeerSession, "ratchetJson">,
+): Promise<void> {
+  console.log(
+    `${RATCHET_DBG} persistPeerSessionWithRatchet peer=${peerId} role=${payload.role} rootKey(from masterSecret)=${dbgRootPreviewFromMasterSecret(payload.masterSecret)}`,
+  );
+  const ratchet = await RatchetSession.fromRootKey(base64UrlToBytes(payload.masterSecret), payload.role);
+  writeStoredPeerSession(peerId, { ...payload, ratchetJson: ratchet.serialize() });
+  console.log(`${RATCHET_DBG} persistPeerSessionWithRatchet peer=${peerId}: ratchet JSON saved to localStorage`);
 }
 
 function readActiveSession(peerId: string): {
   ephemeralPublicKey: string;
   usedOneTimePreKeyId: string | null;
 } | null {
-  if (typeof window === "undefined") return null;
-  const raw = window.sessionStorage.getItem(`session_${peerId}`);
-  if (!raw) return null;
-  try {
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    if (typeof parsed?.ephemeralPublicKey === "string") {
-      return {
-        ephemeralPublicKey: parsed.ephemeralPublicKey,
-        usedOneTimePreKeyId:
-          parsed.usedOneTimePreKeyId === undefined || parsed.usedOneTimePreKeyId === null
-            ? null
-            : String(parsed.usedOneTimePreKeyId),
-      };
-    }
-  } catch {
-    /* ignore */
-  }
-  return null;
+  const s = readStoredPeerSession(peerId);
+  if (!s) return null;
+  return {
+    ephemeralPublicKey: s.ephemeralPublicKey,
+    usedOneTimePreKeyId: s.usedOneTimePreKeyId,
+  };
 }
 
-/** Must match `KeyStorageService` / `establishSession` — always prefer the `primary` device bundle. */
 const DEFAULT_SIGNAL_DEVICE_ID = "primary";
 
-/** Same storage slot as `use-signal-session` / X3DH so header IK and DH1 use one bundle. */
 export function readMyPrivateBundle(myUserId: string): unknown | null {
   if (typeof window === "undefined") return null;
   const primaryKey = `${PRIVATE_BUNDLE_PREFIX}:${myUserId}:${DEFAULT_SIGNAL_DEVICE_ID}`;
@@ -159,7 +231,7 @@ export function readMyPrivateBundle(myUserId: string): unknown | null {
         return parsed.privateBundle;
       }
     } catch {
-      /* fall through to scan */
+      /* fall through */
     }
   }
   const wantedPrefix = `${PRIVATE_BUNDLE_PREFIX}:${myUserId}:`;
@@ -179,11 +251,6 @@ export function readMyPrivateBundle(myUserId: string): unknown | null {
   return null;
 }
 
-/**
- * If the server's stored identity key for this user differs from the local bundle's public IK,
- * re-upload the key bundle so senders fetch a consistent identity.
- * Returns true when a re-registration upload was performed.
- */
 async function ensureIdentitySyncWithServer(myUserId: string): Promise<boolean> {
   const local = readMyPrivateBundle(myUserId) as { identityKey?: { publicKey?: string } } | null;
   const localIk = local?.identityKey?.publicKey;
@@ -213,22 +280,11 @@ async function ensureIdentitySyncWithServer(myUserId: string): Promise<boolean> 
   return true;
 }
 
-/** Returns a non-empty masterSecret for `session_{peerId}` or null if missing/invalid. */
 export function readStoredMasterSecret(peerId: string): string | null {
-  if (typeof window === "undefined") return null;
-  const raw = window.sessionStorage.getItem(`session_${peerId}`);
-  if (!raw) return null;
-  try {
-    const parsed = JSON.parse(raw) as { masterSecret?: unknown };
-    return typeof parsed.masterSecret === "string" && parsed.masterSecret.length > 0
-      ? parsed.masterSecret
-      : null;
-  } catch {
-    return null;
-  }
+  const s = readStoredPeerSession(peerId);
+  return s?.masterSecret?.length ? s.masterSecret : null;
 }
 
-/** Passive receiver: derive masterSecret from first message header only (no key-bundle fetch). */
 export async function maybeDeriveSession(
   myUserId: string,
   senderId: string,
@@ -272,18 +328,14 @@ export async function maybeDeriveSession(
   });
   console.log("[Signal][rx] myPrivateBundle from sessionStorage (sanitized):", bundleDebugSnapshot(myPrivateBundle));
 
-  const persistSession = (masterSecret: string) => {
-    window.sessionStorage.setItem(
-      `session_${senderId}`,
-      JSON.stringify({
-        masterSecret,
-        ephemeralPublicKey: header.ephemeral_public_key,
-        usedOneTimePreKeyId: header.used_one_time_pre_key_id,
-      }),
-    );
-    console.log(
-      `[Signal] Incoming session derived from ${senderId} masterSecret=${masterSecret.slice(0, 16)}…`,
-    );
+  const persistSession = async (masterSecret: string) => {
+    await persistPeerSessionWithRatchet(senderId, {
+      masterSecret,
+      ephemeralPublicKey: header.ephemeral_public_key,
+      usedOneTimePreKeyId: header.used_one_time_pre_key_id,
+      role: "responder",
+    });
+    console.log(`[Signal] Incoming session derived from ${senderId} masterSecret=${masterSecret.slice(0, 16)}…`);
     dispatchSignalSessionUpdated({ peerUserId: senderId });
   };
 
@@ -294,7 +346,7 @@ export async function maybeDeriveSession(
       header.ephemeral_public_key,
       header.used_one_time_pre_key_id,
     );
-    persistSession(masterSecret);
+    await persistSession(masterSecret);
   };
 
   try {
@@ -303,7 +355,7 @@ export async function maybeDeriveSession(
     const enc = header as EncryptionHeader;
     const rxIk = (myPrivateBundle as { identityKey?: { publicKey?: string } })?.identityKey?.publicKey;
     console.error(
-      "[Signal][rx] Derivation failed. The wire header advertises sender_identity_key_public; the sender must use the private key that matches that public key for X3DH. If the header used a key from a different device slot or stale bundle, DH1/DH2 will not match the receiver.",
+      "[Signal][rx] Derivation failed. The wire header advertises sender_identity_key_public; the sender must use the private key that matches that public key for X3DH.",
       {
         wire_sender_identity_key_public: enc.sender_identity_key_public,
         receiver_local_identity_key_public: rxIk,
@@ -324,18 +376,26 @@ export async function maybeDeriveSession(
     try {
       await attemptDerive(bundleAfterSync);
     } catch (retryError) {
-      const enc = header as EncryptionHeader;
-      const rxIk = (bundleAfterSync as { identityKey?: { publicKey?: string } })?.identityKey?.publicKey;
+      const enc2 = header as EncryptionHeader;
+      const rxIk2 = (bundleAfterSync as { identityKey?: { publicKey?: string } })?.identityKey?.publicKey;
       console.error(
-        "[Signal][rx] Derivation failed after re-sync. Wire sender identity still inconsistent with X3DH math or local receiver keys.",
-        { wire_sender_identity_key_public: enc.sender_identity_key_public, receiver_local_identity_key_public: rxIk },
+        "[Signal][rx] Derivation failed after re-sync.",
+        { wire_sender_identity_key_public: enc2.sender_identity_key_public, receiver_local_identity_key_public: rxIk2 },
       );
-      console.error("[Signal] deriveIncomingSession retry failed:", retryError, {
-        senderId,
-        localOpkIds,
-      });
+      console.error("[Signal] deriveIncomingSession retry failed:", retryError, { senderId, localOpkIds });
     }
   }
+}
+
+function isUsableEncryptionHeader(h: unknown): h is EncryptionHeader {
+  if (!h || typeof h !== "object") return false;
+  const o = h as Record<string, unknown>;
+  return (
+    typeof o.ephemeral_public_key === "string" &&
+    o.ephemeral_public_key.length > 0 &&
+    typeof o.sender_identity_key_public === "string" &&
+    o.sender_identity_key_public.length > 0
+  );
 }
 
 export function useChatWebSocket(clientId: string) {
@@ -366,14 +426,41 @@ export function useChatWebSocket(clientId: string) {
         await maybeDeriveSession(clientId, row.sender_id, row.encryption_header);
       }
 
-      const decryptedRows = await Promise.all(
-        rows.map(async (row) => {
-          const sessionPeerId = row.sender_id === clientId ? row.recipient_id : row.sender_id;
-          const masterSecret = readStoredMasterSecret(sessionPeerId);
-          const content = await decryptOrPlaceholder(masterSecret, row.content);
-          return { row, content };
-        }),
+      const stored = readStoredPeerSession(peerId);
+      console.log(
+        `${RATCHET_DBG} loadConversation history replay peer=${peerId} rows=${rows.length} ` +
+          (stored?.masterSecret
+            ? `rootKey=${dbgRootPreviewFromMasterSecret(stored.masterSecret)} role=${stored.role}`
+            : "(no session)"),
       );
+      const replay =
+        stored?.masterSecret &&
+        (await RatchetSession.fromRootKey(base64UrlToBytes(stored.masterSecret), stored.role));
+
+      const decryptedRows: { row: HistoryRow; content: string }[] = [];
+      for (const row of rows) {
+        const header = row.encryption_header as EncryptionHeader | undefined;
+        const sessionPeerId = row.sender_id === clientId ? row.recipient_id : row.sender_id;
+        let content: string;
+
+        if (replay && header && typeof header.counter === "number") {
+          try {
+            if (row.sender_id === clientId) {
+              const { messageKey } = await replay.getNextSenderKey();
+              content = await decryptWithMessageKey(messageKey, row.content);
+            } else {
+              const mk = await replay.advanceReceiverTo(header.counter);
+              content = await decryptWithMessageKey(mk, row.content);
+            }
+          } catch {
+            content = await decryptOrPlaceholder(readStoredMasterSecret(sessionPeerId), row.content);
+          }
+        } else {
+          content = await decryptOrPlaceholder(readStoredMasterSecret(sessionPeerId), row.content);
+        }
+
+        decryptedRows.push({ row, content });
+      }
 
       setMessages((prev) => {
         const seen = new Set<string>();
@@ -463,13 +550,64 @@ export function useChatWebSocket(clientId: string) {
         };
 
         const handleDecryptedAppend = async () => {
-          if (!chat.echo && chat.sender_id !== clientId && chat.encryption_header) {
+          if (chat.echo) {
+            setMessages((prev) => {
+              const localMatchIdx = prev.findIndex((m) => m.clientMessageId === chat.client_message_id);
+              if (localMatchIdx >= 0) {
+                const updated = [...prev];
+                updated[localMatchIdx] = {
+                  ...updated[localMatchIdx],
+                  clientMessageId: chat.message_id ?? updated[localMatchIdx].clientMessageId,
+                  echo: true,
+                  delivered: chat.delivered,
+                  receivedAt: chat.created_at ?? updated[localMatchIdx].receivedAt,
+                };
+                return updated;
+              }
+              if (stableClientId && prev.some((m) => m.clientMessageId === stableClientId)) {
+                return prev;
+              }
+              return [
+                ...prev,
+                {
+                  senderId: chat.sender_id,
+                  recipientId: chat.recipient_id,
+                  content: ENCRYPTED_PLACEHOLDER,
+                  clientMessageId: stableClientId,
+                  echo: true,
+                  delivered: chat.delivered,
+                  receivedAt: chat.created_at ?? new Date().toISOString(),
+                },
+              ];
+            });
+            return;
+          }
+
+          if (chat.sender_id !== clientId && chat.encryption_header) {
             await maybeDeriveSession(clientId, chat.sender_id, chat.encryption_header);
           }
-          const masterSecret = readStoredMasterSecret(sessionPeerId);
-          const decrypted = chat.content
-            ? await decryptOrPlaceholder(masterSecret, chat.content)
-            : ENCRYPTED_PLACEHOLDER;
+
+          const header = chat.encryption_header as EncryptionHeader | undefined;
+          let decrypted: string;
+          if (header && typeof header.counter === "number") {
+            try {
+              console.log(
+                `${RATCHET_DBG} WebSocket inbound peer=${sessionPeerId} header.counter=${header.counter}`,
+              );
+              const ratchet = await loadLiveRatchet(sessionPeerId, "ws-rx");
+              if (!ratchet) {
+                decrypted = ENCRYPTED_PLACEHOLDER;
+              } else {
+                const messageKey = await ratchet.advanceReceiverTo(header.counter);
+                await saveLiveRatchet(sessionPeerId, ratchet);
+                decrypted = await decryptWithMessageKey(messageKey, chat.content);
+              }
+            } catch {
+              decrypted = await decryptOrPlaceholder(readStoredMasterSecret(sessionPeerId), chat.content);
+            }
+          } else {
+            decrypted = await decryptOrPlaceholder(readStoredMasterSecret(sessionPeerId), chat.content);
+          }
           appendMessage(decrypted);
         };
 
@@ -480,7 +618,6 @@ export function useChatWebSocket(clientId: string) {
     connect();
 
     return () => {
-      // NOTE: do not touch sessionStorage here. Signal sessions must persist across reconnects.
       isMounted = false;
       if (reconnectTimerRef.current) {
         clearTimeout(reconnectTimerRef.current);
@@ -496,7 +633,6 @@ export function useChatWebSocket(clientId: string) {
         return;
       }
 
-      let encryptionHeader: EncryptionHeader | undefined;
       const session = readActiveSession(message.recipientId);
       const masterSecret = readStoredMasterSecret(message.recipientId);
       if (!session?.ephemeralPublicKey || !masterSecret) {
@@ -515,19 +651,49 @@ export function useChatWebSocket(clientId: string) {
         );
         return;
       }
-      encryptionHeader = {
-        ephemeral_public_key: session.ephemeralPublicKey,
-        used_one_time_pre_key_id: session.usedOneTimePreKeyId,
-        sender_identity_key_public: senderIK,
-      };
 
       let ciphertext: string;
+      let counter: number;
       try {
-        ciphertext = await encryptMessage(masterSecret, message.content);
+        console.log(
+          `${RATCHET_DBG} WebSocket outbound peer=${message.recipientId} (following Send lines show chain evolution)`,
+        );
+        const ratchet = await loadLiveRatchet(message.recipientId, "ws-tx");
+        if (!ratchet) throw new Error("no ratchet");
+        const next = await ratchet.getNextSenderKey();
+        await saveLiveRatchet(message.recipientId, ratchet);
+        ciphertext = await encryptWithMessageKey(next.messageKey, message.content);
+        counter = next.counter;
+        console.log(
+          `${RATCHET_DBG} WebSocket outbound peer=${message.recipientId} encrypted bytes=${ciphertext.length} header.counter=${counter}`,
+        );
       } catch (error) {
         console.error("[ChatWS] Encryption failed; not sending:", error);
         return;
       }
+
+      const encryptionHeader: EncryptionHeader = {
+        ephemeral_public_key: session.ephemeralPublicKey,
+        used_one_time_pre_key_id: session.usedOneTimePreKeyId,
+        sender_identity_key_public: senderIK,
+        counter,
+      };
+
+      setMessages((prev) => {
+        if (prev.some((m) => m.clientMessageId === message.clientMessageId)) return prev;
+        return [
+          ...prev,
+          {
+            senderId: clientId,
+            recipientId: message.recipientId,
+            content: message.content,
+            clientMessageId: message.clientMessageId,
+            echo: true,
+            delivered: false,
+            receivedAt: new Date().toISOString(),
+          },
+        ];
+      });
 
       socketRef.current.send(
         JSON.stringify({
