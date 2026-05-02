@@ -28,6 +28,14 @@ interface ChatEvent {
   echo?: boolean;
   delivered?: boolean;
   encryption_header?: EncryptionHeader;
+  message_id?: string;
+  created_at?: string;
+}
+
+interface WsErrorEvent {
+  type: "error";
+  reason?: string;
+  client_message_id?: string;
 }
 
 function readActiveSession(peerId: string): {
@@ -96,16 +104,26 @@ export function useChatWebSocket(clientId: string) {
         }
       };
       socket.onmessage = (event) => {
-        let payload: PresenceEvent | ChatEvent;
+        let payload: PresenceEvent | ChatEvent | WsErrorEvent;
 
         try {
-          payload = JSON.parse(event.data) as PresenceEvent | ChatEvent;
+          payload = JSON.parse(event.data) as PresenceEvent | ChatEvent | WsErrorEvent;
         } catch {
           return;
         }
 
         if (payload.type === "presence") {
           setOnlineClients(payload.online_clients);
+          return;
+        }
+
+        if (payload.type === "error") {
+          console.error(
+            "[ChatWS] Server rejected message:",
+            payload.reason,
+            "client_message_id =",
+            payload.client_message_id,
+          );
           return;
         }
 

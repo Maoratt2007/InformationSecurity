@@ -1,12 +1,15 @@
+import asyncio
 import logging
 import time
 
 import httpx
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from postgrest.exceptions import APIError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from .logging_utils import log_event
+from .repositories.messages import MessageRepository
 from .routes.key_bundles import router as users_router
 from .websocket_manager import ConnectionManager
 
@@ -94,16 +97,77 @@ async def websocket_chat(websocket: WebSocket, client_id: str) -> None:
     await manager.broadcast_presence()
 
     try:
+        message_repository = MessageRepository()
+    except Exception as exc:  # noqa: BLE001 - surface config errors without crashing connect
+        log_event(f"WS persistence disabled: {type(exc).__name__}: {exc}")
+        message_repository = None
+
+    try:
         while True:
             payload = await websocket.receive_json()
             recipient_id = payload.get("recipient_id")
+            content = payload.get("content", "")
+            client_message_id = payload.get("client_message_id")
+            encryption_header = payload.get("encryption_header")
+
+            if message_repository is None:
+                await manager.send_to_client(
+                    client_id,
+                    {
+                        "type": "error",
+                        "reason": "Message persistence is not configured. Check SUPABASE_URL / API key.",
+                        "client_message_id": client_message_id,
+                    },
+                )
+                continue
+
+            if not recipient_id:
+                await manager.send_to_client(
+                    client_id,
+                    {
+                        "type": "error",
+                        "reason": "Missing recipient_id; cannot save message.",
+                        "client_message_id": client_message_id,
+                    },
+                )
+                continue
+
+            try:
+                saved = await asyncio.to_thread(
+                    message_repository.persist_chat_message,
+                    sender_id=client_id,
+                    recipient_id=recipient_id,
+                    content=content,
+                    encryption_header=encryption_header,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log_event(
+                    f"Chat persist failed sender={client_id} recipient={recipient_id} "
+                    f"client_message_id={client_message_id} {type(exc).__name__}: {exc}"
+                )
+                if isinstance(exc, APIError) and exc.message:
+                    reason = f"Database save failed: {exc.message}"
+                else:
+                    reason = f"Database save failed: {type(exc).__name__}"
+                await manager.send_to_client(
+                    client_id,
+                    {
+                        "type": "error",
+                        "reason": reason,
+                        "client_message_id": client_message_id,
+                    },
+                )
+                continue
+
             message = {
                 "type": "chat",
                 "sender_id": client_id,
                 "recipient_id": recipient_id,
-                "content": payload.get("content", ""),
-                "client_message_id": payload.get("client_message_id"),
-                "encryption_header": payload.get("encryption_header"),
+                "content": content,
+                "client_message_id": client_message_id,
+                "encryption_header": encryption_header,
+                "message_id": saved.get("id"),
+                "created_at": saved.get("created_at"),
             }
             delivered = False
             if recipient_id:
