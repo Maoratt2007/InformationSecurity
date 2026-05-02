@@ -4,20 +4,23 @@ import { FormEvent, useState } from "react";
 import { SendHorizonal } from "lucide-react";
 
 interface MessageInputProps {
-  onSend: (content: string) => void;
+  onSend: (content: string) => void | Promise<void>;
   disabled?: boolean;
+  /** First 6 characters of base64url masterSecret for active peer (debug). */
+  sessionKeyThumbprint?: string | null;
 }
 
-export function MessageInput({ onSend, disabled = false }: MessageInputProps) {
+export function MessageInput({ onSend, disabled = false, sessionKeyThumbprint }: MessageInputProps) {
   const [text, setText] = useState("");
 
-  function submit(event: FormEvent<HTMLFormElement>) {
+  async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!text.trim() || disabled) {
       return;
     }
-    onSend(text.trim());
+    const out = text.trim();
     setText("");
+    await Promise.resolve(onSend(out));
   }
 
   return (
@@ -38,6 +41,11 @@ export function MessageInput({ onSend, disabled = false }: MessageInputProps) {
           Send
         </button>
       </div>
+      {sessionKeyThumbprint ? (
+        <p className="mt-2 px-1 text-[11px] leading-tight text-slate-500">
+          Session Key Thumbprint: <span className="font-mono text-slate-700">{sessionKeyThumbprint}</span>
+        </p>
+      ) : null}
     </form>
   );
 }

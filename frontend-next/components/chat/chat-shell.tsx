@@ -1,9 +1,15 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { LogOut, ShieldCheck } from "lucide-react";
 import { logoutUser } from "@/lib/auth/logout";
-import { useChatWebSocket } from "@/hooks/use-chat-websocket";
+import {
+  readStoredMasterSecret,
+  SIGNAL_SESSION_UPDATED_EVENT,
+  useChatWebSocket,
+} from "@/hooks/use-chat-websocket";
+import { useSignalSession } from "@/hooks/use-signal-session";
+import { supabase } from "@/lib/supabase/client";
 import type { ChatContact } from "@/types/chat";
 import { ChatWindow } from "./chat-window";
 import { ContactList } from "./contact-list";
@@ -16,7 +22,43 @@ interface ChatShellProps {
 
 export function ChatShell({ clientId, contacts: initialContacts }: ChatShellProps) {
   const [activeContactId, setActiveContactId] = useState(initialContacts[0]?.id ?? "");
-  const { isConnected, messages, onlineClients, sendMessage } = useChatWebSocket(clientId);
+  const [sessionKeyThumbprint, setSessionKeyThumbprint] = useState<string | null>(null);
+  const { isConnected, messages, onlineClients, sendMessage, loadConversation } =
+    useChatWebSocket(clientId);
+  const { establishSession } = useSignalSession();
+
+  useEffect(() => {
+    if (!activeContactId || activeContactId === clientId) return;
+
+    let cancelled = false;
+
+    (async () => {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      const token = session?.access_token;
+      if (!token || cancelled) return;
+      await loadConversation(activeContactId, token);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeContactId, clientId, loadConversation]);
+
+  useEffect(() => {
+    const syncThumbprint = () => {
+      if (!activeContactId) {
+        setSessionKeyThumbprint(null);
+        return;
+      }
+      const ms = readStoredMasterSecret(activeContactId);
+      setSessionKeyThumbprint(ms ? ms.slice(0, 6) : null);
+    };
+    syncThumbprint();
+    window.addEventListener(SIGNAL_SESSION_UPDATED_EVENT, syncThumbprint);
+    return () => window.removeEventListener(SIGNAL_SESSION_UPDATED_EVENT, syncThumbprint);
+  }, [activeContactId]);
 
   const contacts = useMemo<ChatContact[]>(
     () =>
@@ -60,14 +102,22 @@ export function ChatShell({ clientId, contacts: initialContacts }: ChatShellProp
         <ChatWindow messages={filteredMessages} currentUserId={clientId} />
         <MessageInput
           disabled={!isConnected || !activeContactId}
-          onSend={(content) =>
-            sendMessage({
+          sessionKeyThumbprint={sessionKeyThumbprint}
+          onSend={async (content) => {
+            const {
+              data: { session },
+            } = await supabase.auth.getSession();
+            const accessToken = session?.access_token;
+            if (accessToken) {
+              await establishSession(clientId, activeContactId, accessToken);
+            }
+            await sendMessage({
               senderId: clientId,
               recipientId: activeContactId,
               content,
               clientMessageId: crypto.randomUUID(),
-            })
-          }
+            });
+          }}
         />
       </div>
     </div>

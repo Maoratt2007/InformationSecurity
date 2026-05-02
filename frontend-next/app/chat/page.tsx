@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { ChatShell } from "@/components/chat/chat-shell";
+import { verifyDatabaseIdentityOrResetAndUpload } from "@/lib/crypto/identityVerification";
 import { supabase } from "@/lib/supabase/client";
 import { fetchSignalProfiles, upsertSignalProfile } from "@/lib/supabase/profiles";
 import type { ChatContact } from "@/types/chat";
@@ -23,11 +24,17 @@ export default function ChatPage() {
       }
 
       const user = sessionData.session.user;
+      const accessToken = sessionData.session.access_token;
+
       await upsertSignalProfile({
         id: user.id,
         email: user.email ?? "",
         fullName: user.user_metadata?.full_name,
       });
+
+      if (accessToken) {
+        await verifyDatabaseIdentityOrResetAndUpload(user.id, accessToken);
+      }
 
       const profiles = await fetchSignalProfiles(user.id);
 
