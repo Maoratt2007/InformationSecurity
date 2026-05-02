@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from .logging_utils import log_event
 from .repositories.messages import MessageRepository
 from .routes.key_bundles import router as users_router
+from .routes.messages import router as conversations_router
 from .websocket_manager import ConnectionManager
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:     %(message)s")
@@ -76,6 +77,7 @@ async def log_http_requests(request: Request, call_next):
 
 
 fastapi_app.include_router(users_router)
+fastapi_app.include_router(conversations_router)
 
 manager = ConnectionManager()
 
@@ -169,6 +171,10 @@ async def websocket_chat(websocket: WebSocket, client_id: str) -> None:
                 "message_id": saved.get("id"),
                 "created_at": saved.get("created_at"),
             }
+            log_event(
+                f"WS broadcast sender={client_id} recipient={recipient_id} "
+                f"message_id={saved.get('id')} encryption_header={encryption_header}"
+            )
             delivered = False
             if recipient_id:
                 delivered = await manager.send_to_client(recipient_id, message)

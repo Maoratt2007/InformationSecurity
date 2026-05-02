@@ -168,6 +168,7 @@ class SignalProtocolRepository:
             self.client.table("identity_keys")
             .select("user_id, identity_key_public")
             .eq("user_id", user_id)
+            .order("created_at", desc=True)
             .limit(1)
             .execute()
         )

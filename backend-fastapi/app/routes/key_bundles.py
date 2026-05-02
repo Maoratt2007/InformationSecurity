@@ -1,5 +1,5 @@
 import httpx
-from fastapi import APIRouter, Header, HTTPException, status
+from fastapi import APIRouter, Header, HTTPException, Query, status
 
 from ..database import SignalProtocolRepository
 from ..logging_utils import log_event
@@ -119,16 +119,34 @@ def upsert_key_bundle(
 def get_key_bundle(
     user_id: str,
     device_id: str = "primary",
+    peek_own_bundle: bool = Query(
+        False,
+        description="If true, fetch your own bundle without consuming a one-time pre-key.",
+    ),
     authorization: str | None = Header(default=None),
 ) -> dict:
-    log_event(f"Key-bundle fetch received user_id={user_id} device_id={device_id}")
+    log_event(
+        f"Key-bundle fetch received user_id={user_id} device_id={device_id} "
+        f"peek_own_bundle={peek_own_bundle}"
+    )
     repository = SignalProtocolRepository()
-    get_authorized_user_id(repository, authorization)
-    bundle = repository.get_public_key_bundle(user_id=user_id, consume_one_time_pre_key=True)
+    authorized_user_id = get_authorized_user_id(repository, authorization)
+    consume_opk = True
+    if peek_own_bundle:
+        if authorized_user_id != user_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="peek_own_bundle is only allowed when requesting your own key bundle",
+            )
+        consume_opk = False
+    bundle = repository.get_public_key_bundle(
+        user_id=user_id,
+        consume_one_time_pre_key=consume_opk,
+    )
     if not bundle:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Key bundle not found")
     log_event(
         f"Key-bundle fetch served user_id={user_id} "
-        f"opk_consumed={bool(bundle.get('one_time_pre_key'))}"
+        f"opk_consumed={consume_opk and bool(bundle.get('one_time_pre_key'))}"
     )
     return bundle
