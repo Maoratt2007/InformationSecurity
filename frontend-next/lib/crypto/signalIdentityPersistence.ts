@@ -3,7 +3,10 @@
 import type { PrivateIdentityKey } from "./cryptoService";
 import { generateIdentityKeyPair } from "./cryptoService";
 
-const STORAGE_PREFIX = "secure-messenger.signal.persistent-identity.v1";
+/** Prefix for `localStorage` keys holding the long-term Ed25519 identity per user. */
+export const SIGNAL_PERSISTENT_IDENTITY_STORAGE_PREFIX = "secure-messenger.signal.persistent-identity.v1";
+
+const STORAGE_PREFIX = SIGNAL_PERSISTENT_IDENTITY_STORAGE_PREFIX;
 
 function storageKeyForUser(userId: string): string {
   return `${STORAGE_PREFIX}:${userId}`;

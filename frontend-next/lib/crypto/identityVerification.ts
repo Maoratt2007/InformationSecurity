@@ -2,6 +2,7 @@
 
 import { KeyStorageService } from "./keyStorageService";
 import { ensureRegistrationKeyBundleUploaded } from "./registration";
+import { SIGNAL_PERSISTENT_IDENTITY_STORAGE_PREFIX } from "./signalIdentityPersistence";
 
 const PRIVATE_BUNDLE_PREFIX = "secure-messenger.signal.private-bundle.v1";
 
@@ -26,7 +27,11 @@ export function clearSignalCryptoFromLocalStorage(): void {
     for (let i = 0; i < storage.length; i += 1) {
       const key = storage.key(i);
       if (!key) continue;
-      if (key.startsWith(PRIVATE_BUNDLE_PREFIX) || key.startsWith("session_")) {
+      if (
+        key.startsWith(PRIVATE_BUNDLE_PREFIX) ||
+        key.startsWith("session_") ||
+        key.startsWith(SIGNAL_PERSISTENT_IDENTITY_STORAGE_PREFIX)
+      ) {
         keysToRemove.push(key);
       }
     }

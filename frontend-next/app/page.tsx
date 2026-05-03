@@ -1,9 +1,11 @@
+import { HomeSessionRedirect } from "@/components/auth/home-session-redirect";
 import { LoginForm } from "@/components/auth/login-form";
 import { RegisterForm } from "@/components/auth/register-form";
 
 export default function HomePage() {
   return (
     <main className="min-h-screen bg-slate-100 px-4 py-10">
+      <HomeSessionRedirect />
       <div className="mx-auto max-w-6xl">
         <header className="mb-8">
           <h1 className="text-3xl font-bold tracking-tight text-slate-900">University Instant Messaging Portal</h1>

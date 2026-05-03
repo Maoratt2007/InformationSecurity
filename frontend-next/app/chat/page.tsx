@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { ChatShell } from "@/components/chat/chat-shell";
 import { verifyDatabaseIdentityOrResetAndUpload } from "@/lib/crypto/identityVerification";
 import { ensureSignalCryptoInitialized } from "@/lib/crypto/signalCryptoInit";
@@ -9,6 +10,7 @@ import { fetchSignalProfiles, upsertSignalProfile } from "@/lib/supabase/profile
 import type { ChatContact } from "@/types/chat";
 
 export default function ChatPage() {
+  const router = useRouter();
   const [clientId, setClientId] = useState<string | null>(null);
   const [contacts, setContacts] = useState<ChatContact[]>([]);
   const [signalCryptoReady, setSignalCryptoReady] = useState(false);
@@ -21,7 +23,7 @@ export default function ChatPage() {
       const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
 
       if (sessionError || !sessionData.session?.user) {
-        window.location.href = "/";
+        router.replace("/");
         return;
       }
 
@@ -68,7 +70,7 @@ export default function ChatPage() {
     return () => {
       isMounted = false;
     };
-  }, []);
+  }, [router]);
 
   return (
     <main className="min-h-screen bg-slate-100 px-4 py-8">
