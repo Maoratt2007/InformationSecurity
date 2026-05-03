@@ -29,6 +29,8 @@ export function ChatShell({
 }: ChatShellProps) {
   const [activeContactId, setActiveContactId] = useState(initialContacts[0]?.id ?? "");
   const [sessionKeyThumbprint, setSessionKeyThumbprint] = useState<string | null>(null);
+  /** Usernames for peers seen via WebSocket presence before the parent contact list was refetched. */
+  const [presencePeerNames, setPresencePeerNames] = useState<Record<string, string>>({});
   const { isConnected, messages, onlineClients, sendMessage, loadConversation } = useChatWebSocket(clientId, {
     cryptoReady: signalCryptoReady,
   });
@@ -67,14 +69,57 @@ export function ChatShell({
     return () => window.removeEventListener(SIGNAL_SESSION_UPDATED_EVENT, syncThumbprint);
   }, [activeContactId]);
 
-  const contacts = useMemo<ChatContact[]>(
-    () =>
-      initialContacts.map((contact) => ({
-        ...contact,
-        status: onlineClients.includes(contact.id) ? "online" : "offline",
-      })),
-    [initialContacts, onlineClients],
-  );
+  useEffect(() => {
+    const knownIds = new Set(initialContacts.map((c) => c.id));
+    const unknownOnline = onlineClients.filter((id) => id !== clientId && !knownIds.has(id));
+    if (unknownOnline.length === 0) return;
+
+    let cancelled = false;
+    (async () => {
+      const { data, error } = await supabase
+        .schema("signal_protocol")
+        .from("users")
+        .select("id, username")
+        .in("id", unknownOnline);
+      if (cancelled || error || !data?.length) return;
+      setPresencePeerNames((prev) => {
+        const next = { ...prev };
+        for (const row of data) {
+          next[row.id] = row.username;
+        }
+        return next;
+      });
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [onlineClients, clientId, initialContacts]);
+
+  const contacts = useMemo<ChatContact[]>(() => {
+    const knownIds = new Set(initialContacts.map((c) => c.id));
+    const merged: ChatContact[] = initialContacts.map((contact) => ({
+      ...contact,
+      status: onlineClients.includes(contact.id) ? "online" : "offline",
+    }));
+
+    for (const onlineId of onlineClients) {
+      if (onlineId === clientId || knownIds.has(onlineId)) continue;
+      const short = onlineId.replace(/-/g, "").slice(0, 8);
+      merged.push({
+        id: onlineId,
+        name: presencePeerNames[onlineId] ?? `Peer ${short}`,
+        status: "online",
+      });
+    }
+
+    return merged;
+  }, [initialContacts, onlineClients, clientId, presencePeerNames]);
+
+  useEffect(() => {
+    if (contacts.some((c) => c.id === activeContactId)) return;
+    setActiveContactId(contacts[0]?.id ?? "");
+  }, [contacts, activeContactId]);
 
   const filteredMessages = messages.filter(
     (message) =>
