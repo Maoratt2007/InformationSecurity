@@ -66,7 +66,17 @@ export function ChatShell({
     };
     syncThumbprint();
     window.addEventListener(SIGNAL_SESSION_UPDATED_EVENT, syncThumbprint);
-    return () => window.removeEventListener(SIGNAL_SESSION_UPDATED_EVENT, syncThumbprint);
+    const storageKey = `session_${activeContactId}`;
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === storageKey) {
+        syncThumbprint();
+      }
+    };
+    window.addEventListener("storage", onStorage);
+    return () => {
+      window.removeEventListener(SIGNAL_SESSION_UPDATED_EVENT, syncThumbprint);
+      window.removeEventListener("storage", onStorage);
+    };
   }, [activeContactId]);
 
   useEffect(() => {
