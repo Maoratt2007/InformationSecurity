@@ -11,6 +11,7 @@ import {
 import { RatchetSession } from "@/lib/crypto/ratchet";
 import { deriveIncomingSession } from "@/lib/crypto/x3dh";
 import { ensureRegistrationKeyBundleUploaded } from "@/lib/crypto/registration";
+import { KeyStorageService } from "@/lib/crypto/keyStorageService";
 import { supabase } from "@/lib/supabase/client";
 import type { ChatMessage } from "@/types/chat";
 
@@ -18,6 +19,28 @@ const WS_BASE_URL = process.env.NEXT_PUBLIC_CHAT_WS_URL ?? "ws://localhost:8000/
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
 
 const PRIVATE_BUNDLE_PREFIX = "secure-messenger.signal.private-bundle.v1";
+
+let peerSessionSessionStorageMigrated = false;
+
+/** Copy `session_*` peer crypto blobs from sessionStorage once (older builds). */
+function migratePeerSessionKeysFromSessionStorageOnce(): void {
+  if (peerSessionSessionStorageMigrated || typeof window === "undefined") return;
+  if (typeof window.sessionStorage === "undefined") return;
+  peerSessionSessionStorageMigrated = true;
+  const keys: string[] = [];
+  for (let i = 0; i < window.sessionStorage.length; i += 1) {
+    const k = window.sessionStorage.key(i);
+    if (k?.startsWith("session_")) keys.push(k);
+  }
+  for (const k of keys) {
+    const v = window.sessionStorage.getItem(k);
+    if (!v) continue;
+    if (!window.localStorage.getItem(k)) {
+      window.localStorage.setItem(k, v);
+    }
+    window.sessionStorage.removeItem(k);
+  }
+}
 
 /** Fired when `session_${peerId}` is written after X3DH (UI thumbprint, etc.). */
 export const SIGNAL_SESSION_UPDATED_EVENT = "secure-messenger.signal-session-updated";
@@ -114,8 +137,8 @@ interface HistoryRow {
 }
 
 /**
- * One JSON blob in sessionStorage per peer: X3DH metadata + serialized ratchet
- * (chains + senderCounter / receiverCounter). Survives reload in the same tab.
+ * One JSON blob in localStorage per peer: X3DH metadata + serialized ratchet
+ * (chains + senderCounter / receiverCounter). Survives reload and new tabs in this browser.
  */
 interface StoredPeerSession {
   masterSecret: string;
@@ -131,7 +154,8 @@ function sessionKey(peerId: string): string {
 
 function readStoredPeerSession(peerId: string): StoredPeerSession | null {
   if (typeof window === "undefined") return null;
-  const raw = window.sessionStorage.getItem(sessionKey(peerId));
+  migratePeerSessionKeysFromSessionStorageOnce();
+  const raw = window.localStorage.getItem(sessionKey(peerId));
   if (!raw) return null;
   try {
     const o = JSON.parse(raw) as Record<string, unknown>;
@@ -153,7 +177,7 @@ function readStoredPeerSession(peerId: string): StoredPeerSession | null {
 
 function writeStoredPeerSession(peerId: string, session: StoredPeerSession): void {
   if (typeof window === "undefined") return;
-  window.sessionStorage.setItem(sessionKey(peerId), JSON.stringify(session));
+  window.localStorage.setItem(sessionKey(peerId), JSON.stringify(session));
 }
 
 /**
@@ -208,8 +232,9 @@ const DEFAULT_SIGNAL_DEVICE_ID = "primary";
 
 export function readMyPrivateBundle(myUserId: string): unknown | null {
   if (typeof window === "undefined") return null;
+  KeyStorageService.ensureLegacyPrivateBundleMigrated();
   const primaryKey = `${PRIVATE_BUNDLE_PREFIX}:${myUserId}:${DEFAULT_SIGNAL_DEVICE_ID}`;
-  const primaryRaw = window.sessionStorage.getItem(primaryKey);
+  const primaryRaw = window.localStorage.getItem(primaryKey);
   if (primaryRaw) {
     try {
       const parsed = JSON.parse(primaryRaw) as { privateBundle?: unknown };
@@ -221,10 +246,10 @@ export function readMyPrivateBundle(myUserId: string): unknown | null {
     }
   }
   const wantedPrefix = `${PRIVATE_BUNDLE_PREFIX}:${myUserId}:`;
-  for (let index = 0; index < window.sessionStorage.length; index += 1) {
-    const key = window.sessionStorage.key(index);
+  for (let index = 0; index < window.localStorage.length; index += 1) {
+    const key = window.localStorage.key(index);
     if (key?.startsWith(wantedPrefix)) {
-      const raw = window.sessionStorage.getItem(key);
+      const raw = window.localStorage.getItem(key);
       if (!raw) return null;
       try {
         const parsed = JSON.parse(raw) as { privateBundle?: unknown };
@@ -285,7 +310,7 @@ export async function maybeDeriveSession(
 
   const myPrivateBundle = readMyPrivateBundle(myUserId);
   if (!myPrivateBundle) {
-    console.warn("[ChatWS] deriveIncomingSession skipped: no local privateBundle in sessionStorage.");
+    console.warn("[ChatWS] deriveIncomingSession skipped: no local privateBundle in localStorage.");
     return;
   }
 
@@ -312,7 +337,7 @@ export async function maybeDeriveSession(
     used_one_time_pre_key_id: header.used_one_time_pre_key_id,
     sender_identity_key_public: header.sender_identity_key_public,
   });
-  console.log("[Signal][rx] myPrivateBundle from sessionStorage (sanitized):", bundleDebugSnapshot(myPrivateBundle));
+  console.log("[Signal][rx] myPrivateBundle from localStorage (sanitized):", bundleDebugSnapshot(myPrivateBundle));
 
   const persistSession = async (masterSecret: string) => {
     await persistPeerSessionWithRatchet(senderId, {
@@ -383,7 +408,13 @@ function isUsableEncryptionHeader(h: unknown): h is EncryptionHeader {
   );
 }
 
-export function useChatWebSocket(clientId: string) {
+export interface UseChatWebSocketOptions {
+  /** When false, the WebSocket stays closed until local Signal keys are initialized. */
+  cryptoReady?: boolean;
+}
+
+export function useChatWebSocket(clientId: string, options?: UseChatWebSocketOptions) {
+  const cryptoReady = options?.cryptoReady ?? true;
   const socketRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -470,6 +501,11 @@ export function useChatWebSocket(clientId: string) {
   );
 
   useEffect(() => {
+    if (!cryptoReady) {
+      setIsConnected(false);
+      return;
+    }
+
     let isMounted = true;
 
     function connect() {
@@ -605,10 +641,14 @@ export function useChatWebSocket(clientId: string) {
       socketRef.current?.close();
       socketRef.current = null;
     };
-  }, [clientId]);
+  }, [clientId, cryptoReady]);
 
   const sendMessage = useCallback(
     async (message: Omit<ChatMessage, "delivered" | "echo" | "receivedAt">) => {
+      if (!cryptoReady) {
+        console.warn("[ChatWS] Refusing to send: Signal crypto is not ready yet.");
+        return;
+      }
       if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) {
         return;
       }
@@ -627,7 +667,7 @@ export function useChatWebSocket(clientId: string) {
       const senderIK = myBundle?.identityKey?.publicKey;
       if (!senderIK || !myBundle?.identityKey) {
         console.warn(
-          "[ChatWS] Refusing to send: sender identity key not found in sessionStorage (primary bundle).",
+          "[ChatWS] Refusing to send: sender identity key not found in localStorage (primary bundle).",
         );
         return;
       }
@@ -678,7 +718,7 @@ export function useChatWebSocket(clientId: string) {
         }),
       );
     },
-    [clientId],
+    [clientId, cryptoReady],
   );
 
   return {
@@ -687,5 +727,6 @@ export function useChatWebSocket(clientId: string) {
     onlineClients,
     sendMessage,
     loadConversation,
+    cryptoReady,
   };
 }

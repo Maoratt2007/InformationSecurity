@@ -246,7 +246,7 @@ export async function deriveIncomingSession(
         throw new Error(
           `[X3DH] receiver OPK ${expectedId} missing from local bundle. ` +
             `Local OPK ids: [${localIds.join(", ")}]. ` +
-            `Likely cause: client regenerated bundle after the sender fetched the older public bundle. Re-register or clear sessionStorage on both sides.`,
+            `Likely cause: client regenerated bundle after the sender fetched the older public bundle. Re-register or clear localStorage on both sides.`,
         );
       }
       selectedOpkEntry = opk;

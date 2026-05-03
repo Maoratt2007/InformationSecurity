@@ -55,8 +55,8 @@ Copy `frontend-next/.env.local.example` to `frontend-next/.env.local` and set yo
 
 After opening the chat page, compare shared secrets across two browsers:
 
-1. Clear `sessionStorage` on both, refresh, and **log in again** (restores the local private key bundle).
+1. Clear `localStorage` on both, refresh, and **log in again** (restores the local private key bundle).
 2. Sender sends the first message (lazy `initiateX3DH`); receiver derives via message header only.
 3. In each browser DevTools console: `window.__signalSession("<the other user UUID>")` — the returned **masterSecret** strings must be identical on both sides.
 
-If you only cleared `sessionStorage` without logging in again, X3DH cannot run (no private bundle).
+If you only cleared `localStorage` without logging in again, X3DH cannot run (no private bundle).

@@ -14,6 +14,29 @@ const STORAGE_PREFIX = "secure-messenger.signal.private-bundle.v1";
 const STORAGE_VERSION = 1;
 const DEFAULT_DEVICE_ID = "primary";
 
+let privateBundleSessionStorageMigrated = false;
+
+/** Copy private-bundle keys from sessionStorage once (older builds used session-only storage). */
+function migratePrivateBundleKeysFromSessionStorageOnce(): void {
+  if (privateBundleSessionStorageMigrated || typeof window === "undefined") return;
+  if (typeof window.sessionStorage === "undefined") return;
+  privateBundleSessionStorageMigrated = true;
+  const prefix = `${STORAGE_PREFIX}:`;
+  const keys: string[] = [];
+  for (let i = 0; i < window.sessionStorage.length; i += 1) {
+    const k = window.sessionStorage.key(i);
+    if (k?.startsWith(prefix)) keys.push(k);
+  }
+  for (const k of keys) {
+    const v = window.sessionStorage.getItem(k);
+    if (!v) continue;
+    if (!window.localStorage.getItem(k)) {
+      window.localStorage.setItem(k, v);
+    }
+    window.sessionStorage.removeItem(k);
+  }
+}
+
 interface StoredPrivateIdentityKey extends Omit<PrivateIdentityKey, "privateKey"> {
   privateKeyBase64: string;
 }
@@ -42,6 +65,11 @@ interface LocalStoragePrivateBundleRecord {
 }
 
 export class KeyStorageService {
+  /** Ensures any legacy sessionStorage private-bundle keys are moved to localStorage (no-op after first run). */
+  static ensureLegacyPrivateBundleMigrated(): void {
+    migratePrivateBundleKeysFromSessionStorageOnce();
+  }
+
   static save({ userId, deviceId, privateBundle }: StorePrivateBundleOptions): StoredPrivateBundleRecord {
     const storage = this.getStorage();
     const resolvedDeviceId = deviceId ?? privateBundle.deviceId;
@@ -54,7 +82,7 @@ export class KeyStorageService {
     };
 
     storage.setItem(record.storageKey, JSON.stringify(serializeRecord(record)));
-    console.log("[KeyStorageService] Saved private keys to sessionStorage", {
+    console.log("[KeyStorageService] Saved private keys to localStorage", {
       storageKey: record.storageKey,
       userId: record.userId,
       deviceId: record.deviceId,
@@ -64,6 +92,7 @@ export class KeyStorageService {
   }
 
   static load(userId: string, deviceId = DEFAULT_DEVICE_ID): StoredPrivateBundleRecord | undefined {
+    migratePrivateBundleKeysFromSessionStorageOnce();
     const storage = this.getStorage();
     const storageKey = this.buildStorageKey(userId, deviceId);
     const serializedRecord = storage.getItem(storageKey);
@@ -73,7 +102,7 @@ export class KeyStorageService {
     }
 
     const record = deserializeRecord(JSON.parse(serializedRecord));
-    console.log("[KeyStorageService] Loaded private keys from sessionStorage", {
+    console.log("[KeyStorageService] Loaded private keys from localStorage", {
       storageKey: record.storageKey,
       userId: record.userId,
       deviceId: record.deviceId,
@@ -82,6 +111,7 @@ export class KeyStorageService {
   }
 
   static restoreSessionFromLocalStorage(): StoredPrivateBundleRecord | undefined {
+    migratePrivateBundleKeysFromSessionStorageOnce();
     const storage = this.getStorage();
 
     for (let index = 0; index < storage.length; index += 1) {
@@ -122,11 +152,11 @@ export class KeyStorageService {
   }
 
   private static getStorage(): Storage {
-    if (typeof window === "undefined" || typeof window.sessionStorage === "undefined") {
-      throw new Error("sessionStorage is not available. KeyStorageService must run in the browser.");
+    if (typeof window === "undefined" || typeof window.localStorage === "undefined") {
+      throw new Error("localStorage is not available. KeyStorageService must run in the browser.");
     }
 
-    return window.sessionStorage;
+    return window.localStorage;
   }
 }
 
