@@ -18,13 +18,20 @@ import { MessageInput } from "./message-input";
 interface ChatShellProps {
   clientId: string;
   contacts: ChatContact[];
+  /** When false, realtime and send paths stay disabled until keys are initialized upstream. */
+  signalCryptoReady?: boolean;
 }
 
-export function ChatShell({ clientId, contacts: initialContacts }: ChatShellProps) {
+export function ChatShell({
+  clientId,
+  contacts: initialContacts,
+  signalCryptoReady = true,
+}: ChatShellProps) {
   const [activeContactId, setActiveContactId] = useState(initialContacts[0]?.id ?? "");
   const [sessionKeyThumbprint, setSessionKeyThumbprint] = useState<string | null>(null);
-  const { isConnected, messages, onlineClients, sendMessage, loadConversation } =
-    useChatWebSocket(clientId);
+  const { isConnected, messages, onlineClients, sendMessage, loadConversation } = useChatWebSocket(clientId, {
+    cryptoReady: signalCryptoReady,
+  });
   const { establishSession } = useSignalSession();
 
   useEffect(() => {
@@ -101,7 +108,7 @@ export function ChatShell({ clientId, contacts: initialContacts }: ChatShellProp
         </header>
         <ChatWindow messages={filteredMessages} currentUserId={clientId} />
         <MessageInput
-          disabled={!isConnected || !activeContactId}
+          disabled={!signalCryptoReady || !isConnected || !activeContactId}
           sessionKeyThumbprint={sessionKeyThumbprint}
           onSend={async (content) => {
             const {

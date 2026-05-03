@@ -16,25 +16,34 @@ function getFastApiBaseUrl(): string {
 }
 
 /**
- * Removes Signal private-bundle entries and per-peer `session_*` crypto sessions from sessionStorage.
+ * Removes Signal private-bundle entries and per-peer `session_*` crypto sessions from
+ * localStorage and any matching legacy keys in sessionStorage.
  */
-export function clearSignalCryptoFromSessionStorage(): void {
+export function clearSignalCryptoFromLocalStorage(): void {
   if (typeof window === "undefined") return;
-  const keysToRemove: string[] = [];
-  for (let i = 0; i < window.sessionStorage.length; i += 1) {
-    const key = window.sessionStorage.key(i);
-    if (!key) continue;
-    if (key.startsWith(PRIVATE_BUNDLE_PREFIX) || key.startsWith("session_")) {
-      keysToRemove.push(key);
+  const collect = (storage: Storage): string[] => {
+    const keysToRemove: string[] = [];
+    for (let i = 0; i < storage.length; i += 1) {
+      const key = storage.key(i);
+      if (!key) continue;
+      if (key.startsWith(PRIVATE_BUNDLE_PREFIX) || key.startsWith("session_")) {
+        keysToRemove.push(key);
+      }
     }
+    return keysToRemove;
+  };
+  for (const key of collect(window.localStorage)) {
+    window.localStorage.removeItem(key);
   }
-  for (const key of keysToRemove) {
-    window.sessionStorage.removeItem(key);
+  if (typeof window.sessionStorage !== "undefined") {
+    for (const key of collect(window.sessionStorage)) {
+      window.sessionStorage.removeItem(key);
+    }
   }
 }
 
 /**
- * On app load: compare the identity public key in sessionStorage with the database.
+ * On app load: compare the identity public key in localStorage with the database.
  * If the DB has no bundle, or the keys do not match, clear local Signal state and run a full re-registration (new keys + upload).
  */
 export async function verifyDatabaseIdentityOrResetAndUpload(
@@ -55,7 +64,7 @@ export async function verifyDatabaseIdentityOrResetAndUpload(
     console.warn(
       "[Signal] No key bundle in database for this user. Clearing local Signal state and re-registering keys.",
     );
-    clearSignalCryptoFromSessionStorage();
+    clearSignalCryptoFromLocalStorage();
     await ensureRegistrationKeyBundleUploaded({ userId, accessToken });
     return;
   }
@@ -75,7 +84,7 @@ export async function verifyDatabaseIdentityOrResetAndUpload(
     console.warn(
       "[Signal] Database returned no identity key. Clearing local Signal state and re-registering keys.",
     );
-    clearSignalCryptoFromSessionStorage();
+    clearSignalCryptoFromLocalStorage();
     await ensureRegistrationKeyBundleUploaded({ userId, accessToken });
     return;
   }
@@ -93,6 +102,6 @@ export async function verifyDatabaseIdentityOrResetAndUpload(
   }
 
   console.warn("Local Identity Key does not match DB. Resetting local session...");
-  clearSignalCryptoFromSessionStorage();
+  clearSignalCryptoFromLocalStorage();
   await ensureRegistrationKeyBundleUploaded({ userId, accessToken });
 }

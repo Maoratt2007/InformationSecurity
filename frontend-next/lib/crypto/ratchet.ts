@@ -9,7 +9,7 @@ const KDF_CHAIN = new Uint8Array([0x02]);
 
 type RatchetRole = "initiator" | "responder";
 
-/** Wire JSON for sessionStorage — hex-encoded key material + counters. */
+/** Wire JSON for localStorage — hex-encoded key material + counters. */
 interface RatchetWireV1 {
   v: 1;
   role: RatchetRole;
@@ -121,7 +121,7 @@ export class RatchetSession {
     return JSON.stringify(wire);
   }
 
-  /** Restores chains and sender/receiver counters from sessionStorage JSON. */
+  /** Restores chains and sender/receiver counters from localStorage JSON. */
   static async deserialize(json: string): Promise<RatchetSession> {
     const wire = JSON.parse(json) as RatchetWireV1;
     if (wire.v !== 1 || (wire.role !== "initiator" && wire.role !== "responder")) {

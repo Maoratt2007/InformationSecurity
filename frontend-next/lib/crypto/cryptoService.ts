@@ -66,6 +66,8 @@ export interface GenerateRegistrationKeysOptions {
   signedPreKeyId?: number;
   oneTimePreKeyCount?: number;
   oneTimePreKeyStartId?: number;
+  /** When set, registration uses this long-term identity instead of generating a new Ed25519 pair. */
+  identityKey?: PrivateIdentityKey;
 }
 
 export interface SignalRegistrationPayload {
@@ -201,7 +203,7 @@ export function generateSignalRegistrationKeys(
 ): SignalRegistrationResult {
   const deviceId = options.deviceId ?? DEFAULT_DEVICE_ID;
   const createdAt = new Date().toISOString();
-  const identityKey = generateIdentityKeyPair();
+  const identityKey = options.identityKey ?? generateIdentityKeyPair();
   const { publicSignedPreKey, privateSignedPreKey } = generateSignedPreKey(
     identityKey,
     options.signedPreKeyId ?? DEFAULT_SIGNED_PRE_KEY_ID,
