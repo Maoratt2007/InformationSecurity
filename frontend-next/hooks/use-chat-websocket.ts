@@ -12,6 +12,7 @@ import { RatchetSession } from "@/lib/crypto/ratchet";
 import { deriveIncomingSession } from "@/lib/crypto/x3dh";
 import { ensureRegistrationKeyBundleUploaded } from "@/lib/crypto/registration";
 import { KeyStorageService } from "@/lib/crypto/keyStorageService";
+import { broadcastSameUserTab, subscribeSameUserTab } from "@/lib/messenger/same-user-tab-sync";
 import { supabase } from "@/lib/supabase/client";
 import type { ChatMessage } from "@/types/chat";
 
@@ -426,6 +427,46 @@ export function useChatWebSocket(clientId: string, options?: UseChatWebSocketOpt
     window.__signalSession = (peerId: string) => readStoredMasterSecret(peerId);
   }, []);
 
+  useEffect(() => {
+    if (!cryptoReady) return;
+    return subscribeSameUserTab((payload) => {
+      if (payload.senderId !== clientId) return;
+      if (payload.type === "self_outgoing") {
+        setMessages((prev) => {
+          if (prev.some((m) => m.clientMessageId === payload.clientMessageId)) return prev;
+          return [
+            ...prev,
+            {
+              senderId: payload.senderId,
+              recipientId: payload.recipientId,
+              content: payload.content,
+              clientMessageId: payload.clientMessageId,
+              echo: true,
+              delivered: false,
+              receivedAt: payload.receivedAt,
+            },
+          ];
+        });
+        return;
+      }
+      if (payload.type === "self_echo_confirmed") {
+        setMessages((prev) => {
+          const idx = prev.findIndex((m) => m.clientMessageId === payload.clientMessageId);
+          if (idx < 0) return prev;
+          const updated = [...prev];
+          updated[idx] = {
+            ...updated[idx],
+            clientMessageId: payload.serverMessageId,
+            echo: true,
+            delivered: payload.delivered ?? updated[idx].delivered,
+            receivedAt: payload.created_at ?? updated[idx].receivedAt,
+          };
+          return updated;
+        });
+      }
+    });
+  }, [clientId, cryptoReady]);
+
   const loadConversation = useCallback(
     async (peerId: string, accessToken: string) => {
       const url = `${API_BASE_URL}/api/conversations/${encodeURIComponent(peerId)}/messages?limit=50`;
@@ -460,12 +501,19 @@ export function useChatWebSocket(clientId: string, options?: UseChatWebSocketOpt
         if (replay && header && typeof header.counter === "number") {
           try {
             if (row.sender_id === clientId) {
-              const { messageKey } = await replay.getNextSenderKey();
+              const messageKey = await replay.advanceSenderTo(header.counter);
               content = await decryptWithMessageKey(messageKey, row.content);
             } else {
               const mk = await replay.advanceReceiverTo(header.counter);
               content = await decryptWithMessageKey(mk, row.content);
             }
+          } catch {
+            content = await decryptOrPlaceholder(readStoredMasterSecret(sessionPeerId), row.content);
+          }
+        } else if (replay && row.sender_id === clientId) {
+          try {
+            const { messageKey } = await replay.getNextSenderKey();
+            content = await decryptWithMessageKey(messageKey, row.content);
           } catch {
             content = await decryptOrPlaceholder(readStoredMasterSecret(sessionPeerId), row.content);
           }
@@ -573,6 +621,21 @@ export function useChatWebSocket(clientId: string, options?: UseChatWebSocketOpt
             setMessages((prev) => {
               const localMatchIdx = prev.findIndex((m) => m.clientMessageId === chat.client_message_id);
               if (localMatchIdx >= 0) {
+                const cid = chat.client_message_id;
+                const sid = chat.message_id;
+                if (cid && chat.sender_id === clientId) {
+                  queueMicrotask(() => {
+                    broadcastSameUserTab({
+                      type: "self_echo_confirmed",
+                      senderId: clientId,
+                      recipientId: chat.recipient_id,
+                      clientMessageId: cid,
+                      serverMessageId: typeof sid === "string" && sid.length > 0 ? sid : cid,
+                      delivered: chat.delivered,
+                      created_at: chat.created_at,
+                    });
+                  });
+                }
                 const updated = [...prev];
                 updated[localMatchIdx] = {
                   ...updated[localMatchIdx],
@@ -693,6 +756,16 @@ export function useChatWebSocket(clientId: string, options?: UseChatWebSocketOpt
         counter,
       };
 
+      const receivedAt = new Date().toISOString();
+      broadcastSameUserTab({
+        type: "self_outgoing",
+        senderId: clientId,
+        recipientId: message.recipientId,
+        clientMessageId: message.clientMessageId,
+        content: message.content,
+        receivedAt,
+      });
+
       setMessages((prev) => {
         if (prev.some((m) => m.clientMessageId === message.clientMessageId)) return prev;
         return [
@@ -704,7 +777,7 @@ export function useChatWebSocket(clientId: string, options?: UseChatWebSocketOpt
             clientMessageId: message.clientMessageId,
             echo: true,
             delivered: false,
-            receivedAt: new Date().toISOString(),
+            receivedAt,
           },
         ];
       });

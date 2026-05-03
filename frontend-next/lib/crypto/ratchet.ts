@@ -73,6 +73,34 @@ export class RatchetSession {
     return { messageKey, counter };
   }
 
+  /**
+   * Derives the sender message key for a past outbound message whose `encryption_header.counter`
+   * was `counter`, without requiring full history from the first message (unlike sequential
+   * `getNextSenderKey` replay). Mirrors {@link advanceReceiverTo} on the sender chain.
+   */
+  async advanceSenderTo(counter: number): Promise<Uint8Array> {
+    if (this.senderChain.length !== 32) {
+      throw new Error("RatchetSession.advanceSenderTo: invalid sender chain.");
+    }
+    if (!Number.isInteger(counter) || counter < 0) {
+      throw new Error("RatchetSession.advanceSenderTo: counter must be a non-negative integer.");
+    }
+    if (counter < this.senderCounter) {
+      throw new Error(
+        `RatchetSession.advanceSenderTo: stale counter ${counter} (next expected ${this.senderCounter}).`,
+      );
+    }
+    while (this.senderCounter < counter) {
+      const { chainKey } = await RatchetSession.kdfChainStep(this.senderChain);
+      this.senderChain = chainKey;
+      this.senderCounter += 1;
+    }
+    const { messageKey, chainKey } = await RatchetSession.kdfChainStep(this.senderChain);
+    this.senderChain = chainKey;
+    this.senderCounter += 1;
+    return messageKey;
+  }
+
   async advanceReceiverTo(counter: number): Promise<Uint8Array> {
     if (this.receiverChain.length !== 32) {
       throw new Error("RatchetSession.advanceReceiverTo: invalid receiver chain.");
