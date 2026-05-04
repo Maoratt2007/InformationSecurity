@@ -31,6 +31,8 @@ export function ChatShell({
   const [sessionKeyThumbprint, setSessionKeyThumbprint] = useState<string | null>(null);
   /** Usernames for peers seen via WebSocket presence before the parent contact list was refetched. */
   const [presencePeerNames, setPresencePeerNames] = useState<Record<string, string>>({});
+  /** Peer IDs that appeared via realtime presence but are not in `initialContacts`; keep listed as offline after they disconnect. */
+  const [presenceOnlyPeerIds, setPresenceOnlyPeerIds] = useState<string[]>([]);
   const { isConnected, messages, onlineClients, sendMessage, loadConversation } = useChatWebSocket(clientId, {
     cryptoReady: signalCryptoReady,
   });
@@ -106,6 +108,17 @@ export function ChatShell({
     };
   }, [onlineClients, clientId, initialContacts]);
 
+  useEffect(() => {
+    const knownIds = new Set(initialContacts.map((c) => c.id));
+    const discovered = onlineClients.filter((id) => id !== clientId && !knownIds.has(id));
+    if (discovered.length === 0) return;
+    setPresenceOnlyPeerIds((prev) => {
+      const next = new Set(prev);
+      for (const id of discovered) next.add(id);
+      return [...next];
+    });
+  }, [onlineClients, clientId, initialContacts]);
+
   const contacts = useMemo<ChatContact[]>(() => {
     const knownIds = new Set(initialContacts.map((c) => c.id));
     const merged: ChatContact[] = initialContacts.map((contact) => ({
@@ -113,18 +126,18 @@ export function ChatShell({
       status: onlineClients.includes(contact.id) ? "online" : "offline",
     }));
 
-    for (const onlineId of onlineClients) {
-      if (onlineId === clientId || knownIds.has(onlineId)) continue;
-      const short = onlineId.replace(/-/g, "").slice(0, 8);
+    for (const peerId of presenceOnlyPeerIds) {
+      if (peerId === clientId || knownIds.has(peerId)) continue;
+      const short = peerId.replace(/-/g, "").slice(0, 8);
       merged.push({
-        id: onlineId,
-        name: presencePeerNames[onlineId] ?? `Peer ${short}`,
-        status: "online",
+        id: peerId,
+        name: presencePeerNames[peerId] ?? `Peer ${short}`,
+        status: onlineClients.includes(peerId) ? "online" : "offline",
       });
     }
 
     return merged;
-  }, [initialContacts, onlineClients, clientId, presencePeerNames]);
+  }, [initialContacts, onlineClients, clientId, presencePeerNames, presenceOnlyPeerIds]);
 
   useEffect(() => {
     if (contacts.some((c) => c.id === activeContactId)) return;
