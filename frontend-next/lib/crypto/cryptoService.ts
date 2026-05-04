@@ -379,6 +379,17 @@ export async function deletePrivateBundleFromIndexedDb(
   await db.delete("privateBundles", buildStorageKey(userId, deviceId));
 }
 
+/** Clears all cached private bundles from IndexedDB (e.g. on logout). */
+export async function clearPrivateKeyIndexedDbStore(): Promise<void> {
+  if (typeof indexedDB === "undefined") return;
+  try {
+    const db = await openPrivateKeyDatabase();
+    await db.clear("privateBundles");
+  } catch {
+    /* DB may be missing or blocked */
+  }
+}
+
 function buildSignedPreKeySignatureMessage(keyId: number, publicKey: Uint8Array): Uint8Array {
   const context = textEncoder.encode(SIGNED_PRE_KEY_SIGNATURE_CONTEXT);
   const keyIdBytes = new Uint8Array(4);

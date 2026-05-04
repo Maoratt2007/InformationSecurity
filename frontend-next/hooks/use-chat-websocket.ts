@@ -147,6 +147,8 @@ interface StoredPeerSession {
   usedOneTimePreKeyId: string | null;
   role: "initiator" | "responder";
   ratchetJson: string;
+  /** Peer's registration identity key (base64url) when the session was created — used to detect rotation. */
+  peerIdentityKeyPublic?: string;
 }
 
 function sessionKey(peerId: string): string {
@@ -170,6 +172,10 @@ function readStoredPeerSession(peerId: string): StoredPeerSession | null {
           : String(o.usedOneTimePreKeyId),
       role: o.role === "responder" ? "responder" : "initiator",
       ratchetJson: typeof o.ratchetJson === "string" ? o.ratchetJson : "",
+      peerIdentityKeyPublic:
+        typeof o.peerIdentityKeyPublic === "string" && o.peerIdentityKeyPublic.length > 0
+          ? o.peerIdentityKeyPublic
+          : undefined,
     };
   } catch {
     return null;
@@ -200,6 +206,50 @@ async function saveLiveRatchet(peerId: string, ratchet: RatchetSession): Promise
   const stored = readStoredPeerSession(peerId);
   if (!stored) return;
   writeStoredPeerSession(peerId, { ...stored, ratchetJson: ratchet.serialize() });
+}
+
+export const PEER_SESSION_CLEARED_EVENT = "secure-messenger.peer-session-cleared";
+
+/** Drops local ratchet state for a peer (e.g. after key rotation). */
+export function clearPeerSession(peerId: string, reason?: "identity_rotation" | "legacy_migration"): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.removeItem(sessionKey(peerId));
+  dispatchSignalSessionUpdated({ peerUserId: peerId });
+  window.dispatchEvent(
+    new CustomEvent(PEER_SESSION_CLEARED_EVENT, { detail: { peerId, reason } }),
+  );
+}
+
+/** Before (re)establishing a session: drop stale state if the peer’s published identity key changed. */
+export async function invalidatePeerSessionIfKeyBundleRotated(
+  peerId: string,
+  accessToken: string,
+): Promise<void> {
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/users/${encodeURIComponent(peerId)}/key-bundle`, {
+      headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
+    });
+    if (!res.ok) return;
+    const bundle = (await res.json()) as { identity_key_public?: string };
+    const serverIk = bundle.identity_key_public;
+    if (typeof serverIk !== "string" || !serverIk.length) return;
+
+    const stored = readStoredPeerSession(peerId);
+    if (!stored?.masterSecret) return;
+
+    if (!stored.peerIdentityKeyPublic) {
+      console.warn("[Signal] Dropping legacy peer session (no identity fingerprint)", peerId);
+      clearPeerSession(peerId, "legacy_migration");
+      return;
+    }
+
+    if (stored.peerIdentityKeyPublic !== serverIk) {
+      console.warn("[Signal] Peer identity key changed on server; clearing local session", peerId);
+      clearPeerSession(peerId, "identity_rotation");
+    }
+  } catch {
+    /* ignore network errors */
+  }
 }
 
 /** Export for `use-signal-session`: persist peer session + fresh ratchet after X3DH. */
@@ -304,8 +354,26 @@ export async function maybeDeriveSession(
 ): Promise<void> {
   if (typeof window === "undefined") return;
   if (!header || senderId === myUserId) return;
-  if (readStoredMasterSecret(senderId)) return;
   if (!isUsableEncryptionHeader(header)) return;
+
+  const encHeader = header as EncryptionHeader;
+  const senderIk = encHeader.sender_identity_key_public;
+
+  const stored = readStoredPeerSession(senderId);
+  if (stored?.masterSecret) {
+    if (stored.peerIdentityKeyPublic && stored.peerIdentityKeyPublic === senderIk) {
+      return;
+    }
+    if (stored.peerIdentityKeyPublic && stored.peerIdentityKeyPublic !== senderIk) {
+      console.warn("[Signal] Incoming message uses a new sender identity key; resetting session", senderId);
+      clearPeerSession(senderId, "identity_rotation");
+    } else if (!stored.peerIdentityKeyPublic) {
+      console.warn("[Signal] Migrating stale peer session (missing identity fingerprint)", senderId);
+      clearPeerSession(senderId, "legacy_migration");
+    }
+  }
+
+  if (readStoredMasterSecret(senderId)) return;
 
   await ensureIdentitySyncWithServer(myUserId);
 
@@ -343,9 +411,10 @@ export async function maybeDeriveSession(
   const persistSession = async (masterSecret: string) => {
     await persistPeerSessionWithRatchet(senderId, {
       masterSecret,
-      ephemeralPublicKey: header.ephemeral_public_key,
-      usedOneTimePreKeyId: header.used_one_time_pre_key_id,
+      ephemeralPublicKey: encHeader.ephemeral_public_key,
+      usedOneTimePreKeyId: encHeader.used_one_time_pre_key_id,
       role: "responder",
+      peerIdentityKeyPublic: senderIk,
     });
     dispatchSignalSessionUpdated({ peerUserId: senderId });
   };
@@ -353,9 +422,9 @@ export async function maybeDeriveSession(
   const attemptDerive = async (bundle: unknown) => {
     const { masterSecret } = await deriveIncomingSession(
       bundle,
-      header.sender_identity_key_public,
-      header.ephemeral_public_key,
-      header.used_one_time_pre_key_id,
+      encHeader.sender_identity_key_public,
+      encHeader.ephemeral_public_key,
+      encHeader.used_one_time_pre_key_id,
     );
     await persistSession(masterSecret);
   };
@@ -757,24 +826,25 @@ export function useChatWebSocket(clientId: string, options?: UseChatWebSocketOpt
       };
 
       const receivedAt = new Date().toISOString();
+      const outboundClientId = message.clientMessageId ?? "";
       broadcastSameUserTab({
         type: "self_outgoing",
         senderId: clientId,
         recipientId: message.recipientId,
-        clientMessageId: message.clientMessageId,
+        clientMessageId: outboundClientId,
         content: message.content,
         receivedAt,
       });
 
       setMessages((prev) => {
-        if (prev.some((m) => m.clientMessageId === message.clientMessageId)) return prev;
+        if (prev.some((m) => m.clientMessageId === outboundClientId)) return prev;
         return [
           ...prev,
           {
             senderId: clientId,
             recipientId: message.recipientId,
             content: message.content,
-            clientMessageId: message.clientMessageId,
+            clientMessageId: outboundClientId,
             echo: true,
             delivered: false,
             receivedAt,
@@ -786,7 +856,7 @@ export function useChatWebSocket(clientId: string, options?: UseChatWebSocketOpt
         JSON.stringify({
           recipient_id: message.recipientId,
           content: ciphertext,
-          client_message_id: message.clientMessageId,
+          client_message_id: outboundClientId,
           encryption_header: encryptionHeader,
         }),
       );

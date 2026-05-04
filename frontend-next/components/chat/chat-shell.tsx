@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { LogOut, ShieldCheck } from "lucide-react";
 import { logoutUser } from "@/lib/auth/logout";
 import {
+  PEER_SESSION_CLEARED_EVENT,
   readStoredMasterSecret,
   SIGNAL_SESSION_UPDATED_EVENT,
   useChatWebSocket,
@@ -29,6 +30,7 @@ export function ChatShell({
 }: ChatShellProps) {
   const [activeContactId, setActiveContactId] = useState(initialContacts[0]?.id ?? "");
   const [sessionKeyThumbprint, setSessionKeyThumbprint] = useState<string | null>(null);
+  const [peerSessionNotice, setPeerSessionNotice] = useState<string | null>(null);
   /** Usernames for peers seen via WebSocket presence before the parent contact list was refetched. */
   const [presencePeerNames, setPresencePeerNames] = useState<Record<string, string>>({});
   const { isConnected, messages, onlineClients, sendMessage, loadConversation } = useChatWebSocket(clientId, {
@@ -77,6 +79,24 @@ export function ChatShell({
       window.removeEventListener(SIGNAL_SESSION_UPDATED_EVENT, syncThumbprint);
       window.removeEventListener("storage", onStorage);
     };
+  }, [activeContactId]);
+
+  useEffect(() => {
+    setPeerSessionNotice(null);
+  }, [activeContactId]);
+
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<{ peerId?: string; reason?: string }>).detail;
+      if (detail?.peerId !== activeContactId) return;
+      const text =
+        detail.reason === "identity_rotation"
+          ? "This contact’s encryption keys changed (for example after signing in again). Your session was reset — send a message to continue securely."
+          : "Your secure session with this contact was reset to align with updated keys. Send a message to reconnect.";
+      setPeerSessionNotice(text);
+    };
+    window.addEventListener(PEER_SESSION_CLEARED_EVENT, handler);
+    return () => window.removeEventListener(PEER_SESSION_CLEARED_EVENT, handler);
   }, [activeContactId]);
 
   useEffect(() => {
@@ -161,6 +181,18 @@ export function ChatShell({
             </button>
           </div>
         </header>
+        {peerSessionNotice ? (
+          <div className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-950">
+            <p>{peerSessionNotice}</p>
+            <button
+              type="button"
+              className="mt-1 font-medium text-amber-900 underline decoration-amber-700 hover:text-amber-950"
+              onClick={() => setPeerSessionNotice(null)}
+            >
+              Dismiss
+            </button>
+          </div>
+        ) : null}
         <ChatWindow messages={filteredMessages} currentUserId={clientId} />
         <MessageInput
           disabled={!signalCryptoReady || !isConnected || !activeContactId}

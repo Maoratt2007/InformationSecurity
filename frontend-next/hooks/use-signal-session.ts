@@ -1,6 +1,7 @@
 import { initiateX3DH } from "../lib/crypto/x3dh";
 import {
   dispatchSignalSessionUpdated,
+  invalidatePeerSessionIfKeyBundleRotated,
   persistPeerSessionWithRatchet,
   readMyPrivateBundle,
   readStoredMasterSecret,
@@ -19,7 +20,9 @@ export function useSignalSession() {
     if (!activeContactId) return;
     if (!myUserId) return;
 
-    // Strict guard: only skip when a usable masterSecret is already saved.
+    await invalidatePeerSessionIfKeyBundleRotated(activeContactId, accessToken);
+
+    // Strict guard: only skip when a usable masterSecret is already saved (and peer bundle matched).
     if (readStoredMasterSecret(activeContactId)) return;
 
     if (sessionLocks.has(activeContactId)) return;
@@ -63,6 +66,8 @@ export function useSignalSession() {
         ephemeralPublicKey,
         usedOneTimePreKeyId,
         role: "initiator",
+        peerIdentityKeyPublic:
+          typeof receiverBundle.identity_key_public === "string" ? receiverBundle.identity_key_public : undefined,
       });
 
       dispatchSignalSessionUpdated({ peerUserId: activeContactId });
@@ -70,7 +75,7 @@ export function useSignalSession() {
       errored = true;
       console.error("[Signal] Failed to establish secure session:", error);
     } finally {
-      if (errored) sessionLocks.delete(activeContactId);
+      sessionLocks.delete(activeContactId);
     }
   };
 
