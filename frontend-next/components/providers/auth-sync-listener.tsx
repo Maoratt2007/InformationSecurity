@@ -3,7 +3,7 @@
 import { useEffect } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase/client";
-import { clearSignalCryptoFromLocalStorage } from "@/lib/crypto/identityVerification";
+import { clearMessengerCryptoOnSignOut } from "@/lib/crypto/identityVerification";
 
 /**
  * Keeps all tabs in sync with Supabase auth: one sign-out closes protected routes everywhere
@@ -18,7 +18,7 @@ export function AuthSyncListener() {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((event, session) => {
       if (event === "SIGNED_OUT") {
-        clearSignalCryptoFromLocalStorage();
+        clearMessengerCryptoOnSignOut();
         if (pathname.startsWith("/chat")) {
           router.replace("/");
         }

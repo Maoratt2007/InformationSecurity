@@ -69,6 +69,10 @@ export async function encryptMessage(
 /**
  * Decrypt a wire string produced by `encryptMessage`. Throws on tag/key mismatch
  * (callers should map that to the safe placeholder UI).
+ *
+ * Note: `DOMException: OperationError` here means the **message** AES-GCM unwrap failed
+ * (wrong `masterSecret`, wrong ratchet counter vs ciphertext, or corrupt wire). It is
+ * **not** the Supabase `ratchet_key_id` blob — that path uses `sessionEncryption.ts`.
  */
 export async function decryptMessage(
   masterSecretBase64Url: string,

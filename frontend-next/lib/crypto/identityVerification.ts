@@ -3,6 +3,7 @@
 import { KeyStorageService } from "./keyStorageService";
 import { ensureRegistrationKeyBundleUploaded } from "./registration";
 import { SIGNAL_PERSISTENT_IDENTITY_STORAGE_PREFIX } from "./signalIdentityPersistence";
+import { clearSupabaseSessionsAfterIdentityReset } from "../../lib/supabase/sessionStore";
 
 const PRIVATE_BUNDLE_PREFIX = "secure-messenger.signal.private-bundle.v1";
 
@@ -16,34 +17,62 @@ function getFastApiBaseUrl(): string {
   return configuredUrl.replace(/\/$/, "");
 }
 
+function collectKeysMatchingPrefixes(storage: Storage, prefixes: string[]): string[] {
+  const keysToRemove: string[] = [];
+  for (let i = 0; i < storage.length; i += 1) {
+    const key = storage.key(i);
+    if (!key) continue;
+    if (prefixes.some((p) => key.startsWith(p))) {
+      keysToRemove.push(key);
+    }
+  }
+  return keysToRemove;
+}
+
+function removeCollectedFromStorage(storage: Storage, keys: string[]): void {
+  for (const key of keys) {
+    storage.removeItem(key);
+  }
+}
+
 /**
- * Removes Signal private-bundle entries and per-peer `session_*` crypto sessions from
- * localStorage and any matching legacy keys in sessionStorage.
+ * On **Supabase sign-out** only: remove private bundle + per-peer `session_*` keys so another
+ * account on the same browser cannot read them. Does **not** remove the persistent Ed25519
+ * identity — that stays tied to this device so the same user_id can unwrap `ratchet_key_id`
+ * after login.
+ */
+export function clearMessengerCryptoOnSignOut(): void {
+  if (typeof window === "undefined") return;
+  const prefixes = [PRIVATE_BUNDLE_PREFIX, "session_"];
+  const localKeys = collectKeysMatchingPrefixes(window.localStorage, prefixes);
+  removeCollectedFromStorage(window.localStorage, localKeys);
+  if (typeof window.sessionStorage !== "undefined") {
+    const sessionKeys = collectKeysMatchingPrefixes(window.sessionStorage, prefixes);
+    removeCollectedFromStorage(window.sessionStorage, sessionKeys);
+  }
+  console.log(
+    "[Signal] clearMessengerCryptoOnSignOut: removed",
+    localKeys.length,
+    "localStorage key(s) (bundle + session_*); persistent identity key kept.",
+  );
+}
+
+/**
+ * Full reset: bundle, `session_*`, **and** persistent identity (used when server identity
+ * mismatches or bundle is missing — new keys are generated).
  */
 export function clearSignalCryptoFromLocalStorage(): void {
   if (typeof window === "undefined") return;
-  const collect = (storage: Storage): string[] => {
-    const keysToRemove: string[] = [];
-    for (let i = 0; i < storage.length; i += 1) {
-      const key = storage.key(i);
-      if (!key) continue;
-      if (
-        key.startsWith(PRIVATE_BUNDLE_PREFIX) ||
-        key.startsWith("session_") ||
-        key.startsWith(SIGNAL_PERSISTENT_IDENTITY_STORAGE_PREFIX)
-      ) {
-        keysToRemove.push(key);
-      }
-    }
-    return keysToRemove;
-  };
-  for (const key of collect(window.localStorage)) {
-    window.localStorage.removeItem(key);
-  }
+  const prefixes = [
+    PRIVATE_BUNDLE_PREFIX,
+    "session_",
+    SIGNAL_PERSISTENT_IDENTITY_STORAGE_PREFIX,
+  ];
+  const localKeys = collectKeysMatchingPrefixes(window.localStorage, prefixes);
+  removeCollectedFromStorage(window.localStorage, localKeys);
   if (typeof window.sessionStorage !== "undefined") {
-    for (const key of collect(window.sessionStorage)) {
-      window.sessionStorage.removeItem(key);
-    }
+    const sessionKeys = collectKeysMatchingPrefixes(window.sessionStorage, prefixes);
+    removeCollectedFromStorage(window.sessionStorage, sessionKeys);
   }
 }
 
@@ -70,6 +99,7 @@ export async function verifyDatabaseIdentityOrResetAndUpload(
       "[Signal] No key bundle in database for this user. Clearing local Signal state and re-registering keys.",
     );
     clearSignalCryptoFromLocalStorage();
+    await clearSupabaseSessionsAfterIdentityReset(userId);
     await ensureRegistrationKeyBundleUploaded({ userId, accessToken });
     return;
   }
@@ -90,6 +120,7 @@ export async function verifyDatabaseIdentityOrResetAndUpload(
       "[Signal] Database returned no identity key. Clearing local Signal state and re-registering keys.",
     );
     clearSignalCryptoFromLocalStorage();
+    await clearSupabaseSessionsAfterIdentityReset(userId);
     await ensureRegistrationKeyBundleUploaded({ userId, accessToken });
     return;
   }
@@ -108,5 +139,6 @@ export async function verifyDatabaseIdentityOrResetAndUpload(
 
   console.warn("Local Identity Key does not match DB. Resetting local session...");
   clearSignalCryptoFromLocalStorage();
+  await clearSupabaseSessionsAfterIdentityReset(userId);
   await ensureRegistrationKeyBundleUploaded({ userId, accessToken });
 }
