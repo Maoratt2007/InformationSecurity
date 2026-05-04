@@ -1,14 +1,17 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { ChatShell } from "@/components/chat/chat-shell";
 import { verifyDatabaseIdentityOrResetAndUpload } from "@/lib/crypto/identityVerification";
 import { ensureSignalCryptoInitialized } from "@/lib/crypto/signalCryptoInit";
 import { supabase } from "@/lib/supabase/client";
+import { loadAndRestoreSessionsFromSupabase } from "@/lib/supabase/sessionStore";
 import { fetchSignalProfiles, upsertSignalProfile } from "@/lib/supabase/profiles";
 import type { ChatContact } from "@/types/chat";
 
 export default function ChatPage() {
+  const router = useRouter();
   const [clientId, setClientId] = useState<string | null>(null);
   const [contacts, setContacts] = useState<ChatContact[]>([]);
   const [signalCryptoReady, setSignalCryptoReady] = useState(false);
@@ -21,7 +24,7 @@ export default function ChatPage() {
       const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
 
       if (sessionError || !sessionData.session?.user) {
-        window.location.href = "/";
+        router.replace("/");
         return;
       }
 
@@ -37,10 +40,16 @@ export default function ChatPage() {
       setStatus("Loading persistent Signal identity…");
       await ensureSignalCryptoInitialized(user.id);
 
+      // Identity must be settled with the server BEFORE restoring sessions; a reset here
+      // wipes local Signal state and Supabase rows so we don't restore stale ratchets
+      // that were encrypted under a previous identity-derived key.
       if (accessToken) {
         setStatus("Verifying keys with server…");
         await verifyDatabaseIdentityOrResetAndUpload(user.id, accessToken);
       }
+
+      setStatus("Restoring sessions from Supabase…");
+      await loadAndRestoreSessionsFromSupabase(user.id);
 
       setSignalCryptoReady(true);
 
@@ -68,7 +77,7 @@ export default function ChatPage() {
     return () => {
       isMounted = false;
     };
-  }, []);
+  }, [router]);
 
   return (
     <main className="min-h-screen bg-slate-100 px-4 py-8">

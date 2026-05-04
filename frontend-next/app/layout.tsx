@@ -1,6 +1,7 @@
 import "./globals.css";
 import type { Metadata } from "next";
 import { ReactNode } from "react";
+import { AuthSyncListener } from "@/components/providers/auth-sync-listener";
 import { KeyStorageBootstrap } from "@/components/providers/key-storage-bootstrap";
 
 export const metadata: Metadata = {
@@ -13,6 +14,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
     <html lang="en">
       <body>
         <KeyStorageBootstrap />
+        <AuthSyncListener />
         {children}
       </body>
     </html>

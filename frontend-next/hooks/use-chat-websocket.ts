@@ -12,6 +12,8 @@ import { RatchetSession } from "@/lib/crypto/ratchet";
 import { deriveIncomingSession } from "@/lib/crypto/x3dh";
 import { ensureRegistrationKeyBundleUploaded } from "@/lib/crypto/registration";
 import { KeyStorageService } from "@/lib/crypto/keyStorageService";
+import { broadcastSameUserTab, subscribeSameUserTab } from "@/lib/messenger/same-user-tab-sync";
+import { syncSessionToSupabase } from "@/lib/supabase/sessionStore";
 import { supabase } from "@/lib/supabase/client";
 import type { ChatMessage } from "@/types/chat";
 
@@ -139,8 +141,9 @@ interface HistoryRow {
 /**
  * One JSON blob in localStorage per peer: X3DH metadata + serialized ratchet
  * (chains + senderCounter / receiverCounter). Survives reload and new tabs in this browser.
+ * Exported so the sessionStore can reference the type when encrypting/decrypting for Supabase.
  */
-interface StoredPeerSession {
+export interface StoredPeerSession {
   masterSecret: string;
   ephemeralPublicKey: string;
   usedOneTimePreKeyId: string | null;
@@ -175,9 +178,17 @@ function readStoredPeerSession(peerId: string): StoredPeerSession | null {
   }
 }
 
-function writeStoredPeerSession(peerId: string, session: StoredPeerSession): void {
+function writeStoredPeerSession(
+  peerId: string,
+  session: StoredPeerSession,
+  userId?: string,
+): void {
   if (typeof window === "undefined") return;
-  window.localStorage.setItem(sessionKey(peerId), JSON.stringify(session));
+  const json = JSON.stringify(session);
+  window.localStorage.setItem(sessionKey(peerId), json);
+  if (userId) {
+    void syncSessionToSupabase(userId, peerId, json);
+  }
 }
 
 /**
@@ -195,16 +206,25 @@ async function loadLiveRatchet(peerId: string): Promise<RatchetSession | null> {
   return r;
 }
 
-async function saveLiveRatchet(peerId: string, ratchet: RatchetSession): Promise<void> {
+async function saveLiveRatchet(
+  peerId: string,
+  ratchet: RatchetSession,
+  userId?: string,
+): Promise<void> {
   const stored = readStoredPeerSession(peerId);
   if (!stored) return;
-  writeStoredPeerSession(peerId, { ...stored, ratchetJson: ratchet.serialize() });
+  writeStoredPeerSession(peerId, { ...stored, ratchetJson: ratchet.serialize() }, userId);
 }
 
-/** Export for `use-signal-session`: persist peer session + fresh ratchet after X3DH. */
+/**
+ * Persist a new peer session after X3DH key agreement.
+ * When `userId` is provided the session is also encrypted and synced to Supabase so that
+ * the peer can recover the ratchet state when they come back online.
+ */
 export async function persistPeerSessionWithRatchet(
   peerId: string,
   payload: Omit<StoredPeerSession, "ratchetJson">,
+  userId?: string,
 ): Promise<void> {
   const masterSecretHex = bytesToHex(base64UrlToBytes(payload.masterSecret));
   console.log(
@@ -213,7 +233,7 @@ export async function persistPeerSessionWithRatchet(
     masterSecretHex,
   );
   const ratchet = await RatchetSession.fromRootKey(base64UrlToBytes(payload.masterSecret), payload.role);
-  writeStoredPeerSession(peerId, { ...payload, ratchetJson: ratchet.serialize() });
+  writeStoredPeerSession(peerId, { ...payload, ratchetJson: ratchet.serialize() }, userId);
 }
 
 function readActiveSession(peerId: string): {
@@ -340,12 +360,16 @@ export async function maybeDeriveSession(
   console.log("[Signal][rx] myPrivateBundle from localStorage (sanitized):", bundleDebugSnapshot(myPrivateBundle));
 
   const persistSession = async (masterSecret: string) => {
-    await persistPeerSessionWithRatchet(senderId, {
-      masterSecret,
-      ephemeralPublicKey: header.ephemeral_public_key,
-      usedOneTimePreKeyId: header.used_one_time_pre_key_id,
-      role: "responder",
-    });
+    await persistPeerSessionWithRatchet(
+      senderId,
+      {
+        masterSecret,
+        ephemeralPublicKey: header.ephemeral_public_key,
+        usedOneTimePreKeyId: header.used_one_time_pre_key_id,
+        role: "responder",
+      },
+      myUserId,
+    );
     dispatchSignalSessionUpdated({ peerUserId: senderId });
   };
 
@@ -426,6 +450,46 @@ export function useChatWebSocket(clientId: string, options?: UseChatWebSocketOpt
     window.__signalSession = (peerId: string) => readStoredMasterSecret(peerId);
   }, []);
 
+  useEffect(() => {
+    if (!cryptoReady) return;
+    return subscribeSameUserTab((payload) => {
+      if (payload.senderId !== clientId) return;
+      if (payload.type === "self_outgoing") {
+        setMessages((prev) => {
+          if (prev.some((m) => m.clientMessageId === payload.clientMessageId)) return prev;
+          return [
+            ...prev,
+            {
+              senderId: payload.senderId,
+              recipientId: payload.recipientId,
+              content: payload.content,
+              clientMessageId: payload.clientMessageId,
+              echo: true,
+              delivered: false,
+              receivedAt: payload.receivedAt,
+            },
+          ];
+        });
+        return;
+      }
+      if (payload.type === "self_echo_confirmed") {
+        setMessages((prev) => {
+          const idx = prev.findIndex((m) => m.clientMessageId === payload.clientMessageId);
+          if (idx < 0) return prev;
+          const updated = [...prev];
+          updated[idx] = {
+            ...updated[idx],
+            clientMessageId: payload.serverMessageId,
+            echo: true,
+            delivered: payload.delivered ?? updated[idx].delivered,
+            receivedAt: payload.created_at ?? updated[idx].receivedAt,
+          };
+          return updated;
+        });
+      }
+    });
+  }, [clientId, cryptoReady]);
+
   const loadConversation = useCallback(
     async (peerId: string, accessToken: string) => {
       const url = `${API_BASE_URL}/api/conversations/${encodeURIComponent(peerId)}/messages?limit=50`;
@@ -460,12 +524,19 @@ export function useChatWebSocket(clientId: string, options?: UseChatWebSocketOpt
         if (replay && header && typeof header.counter === "number") {
           try {
             if (row.sender_id === clientId) {
-              const { messageKey } = await replay.getNextSenderKey();
+              const messageKey = await replay.advanceSenderTo(header.counter);
               content = await decryptWithMessageKey(messageKey, row.content);
             } else {
               const mk = await replay.advanceReceiverTo(header.counter);
               content = await decryptWithMessageKey(mk, row.content);
             }
+          } catch {
+            content = await decryptOrPlaceholder(readStoredMasterSecret(sessionPeerId), row.content);
+          }
+        } else if (replay && row.sender_id === clientId) {
+          try {
+            const { messageKey } = await replay.getNextSenderKey();
+            content = await decryptWithMessageKey(messageKey, row.content);
           } catch {
             content = await decryptOrPlaceholder(readStoredMasterSecret(sessionPeerId), row.content);
           }
@@ -573,6 +644,21 @@ export function useChatWebSocket(clientId: string, options?: UseChatWebSocketOpt
             setMessages((prev) => {
               const localMatchIdx = prev.findIndex((m) => m.clientMessageId === chat.client_message_id);
               if (localMatchIdx >= 0) {
+                const cid = chat.client_message_id;
+                const sid = chat.message_id;
+                if (cid && chat.sender_id === clientId) {
+                  queueMicrotask(() => {
+                    broadcastSameUserTab({
+                      type: "self_echo_confirmed",
+                      senderId: clientId,
+                      recipientId: chat.recipient_id,
+                      clientMessageId: cid,
+                      serverMessageId: typeof sid === "string" && sid.length > 0 ? sid : cid,
+                      delivered: chat.delivered,
+                      created_at: chat.created_at,
+                    });
+                  });
+                }
                 const updated = [...prev];
                 updated[localMatchIdx] = {
                   ...updated[localMatchIdx],
@@ -615,7 +701,7 @@ export function useChatWebSocket(clientId: string, options?: UseChatWebSocketOpt
                 decrypted = ENCRYPTED_PLACEHOLDER;
               } else {
                 const messageKey = await ratchet.advanceReceiverTo(header.counter);
-                await saveLiveRatchet(sessionPeerId, ratchet);
+                await saveLiveRatchet(sessionPeerId, ratchet, clientId);
                 decrypted = await decryptWithMessageKey(messageKey, chat.content);
               }
             } catch {
@@ -678,7 +764,7 @@ export function useChatWebSocket(clientId: string, options?: UseChatWebSocketOpt
         const ratchet = await loadLiveRatchet(message.recipientId);
         if (!ratchet) throw new Error("no ratchet");
         const next = await ratchet.getNextSenderKey();
-        await saveLiveRatchet(message.recipientId, ratchet);
+        await saveLiveRatchet(message.recipientId, ratchet, clientId);
         ciphertext = await encryptWithMessageKey(next.messageKey, message.content);
         counter = next.counter;
       } catch (error) {
@@ -693,6 +779,18 @@ export function useChatWebSocket(clientId: string, options?: UseChatWebSocketOpt
         counter,
       };
 
+      const receivedAt = new Date().toISOString();
+      if (message.clientMessageId) {
+        broadcastSameUserTab({
+          type: "self_outgoing",
+          senderId: clientId,
+          recipientId: message.recipientId,
+          clientMessageId: message.clientMessageId,
+          content: message.content,
+          receivedAt,
+        });
+      }
+
       setMessages((prev) => {
         if (prev.some((m) => m.clientMessageId === message.clientMessageId)) return prev;
         return [
@@ -704,7 +802,7 @@ export function useChatWebSocket(clientId: string, options?: UseChatWebSocketOpt
             clientMessageId: message.clientMessageId,
             echo: true,
             delivered: false,
-            receivedAt: new Date().toISOString(),
+            receivedAt,
           },
         ];
       });

@@ -180,7 +180,7 @@ async def websocket_chat(websocket: WebSocket, client_id: str) -> None:
                 delivered = await manager.send_to_client(recipient_id, message)
             await manager.send_to_client(client_id, {**message, "echo": True, "delivered": delivered})
     except WebSocketDisconnect:
-        manager.disconnect(client_id=client_id)
+        manager.disconnect(client_id=client_id, websocket=websocket)
         await manager.broadcast_presence()
 
 

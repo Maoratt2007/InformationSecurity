@@ -58,12 +58,16 @@ export function useSignalSession() {
         receiverBundle,
       );
 
-      await persistPeerSessionWithRatchet(activeContactId, {
-        masterSecret,
-        ephemeralPublicKey,
-        usedOneTimePreKeyId,
-        role: "initiator",
-      });
+      await persistPeerSessionWithRatchet(
+        activeContactId,
+        {
+          masterSecret,
+          ephemeralPublicKey,
+          usedOneTimePreKeyId,
+          role: "initiator",
+        },
+        myUserId,
+      );
 
       dispatchSignalSessionUpdated({ peerUserId: activeContactId });
     } catch (error) {
